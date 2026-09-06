@@ -24,6 +24,7 @@ export default defineComponent({
 			openAddFeishuChannelModal,
 			openAddWebhookChannelModal,
 			openAddDingtalkChannelModal,
+			openAddSlackChannelModal,
 			openAddWecomChannelModal,
 			editChannelConfig,
 			testChannelConfig,
@@ -74,6 +75,12 @@ export default defineComponent({
 						{$t('t_1_1746676859550')}
 					</NButton>
 				)
+			} else if (type === 'slack') {
+				return (
+					<NButton strong secondary type="primary" class="gradient-primary-btn" onClick={() => openAddSlackChannelModal(getConfiguredCount(type))}>
+						{$t('t_1_1746676859550')}
+					</NButton>
+				)
 			} else if (type === 'workwx') {
 				return (
 					<NButton strong secondary type="primary" class="gradient-primary-btn" onClick={() => openAddWecomChannelModal(getConfiguredCount(type))}>
@@ -114,6 +121,12 @@ export default defineComponent({
 				name: $t('t_5_1746676856974'),
 				description: $t('t_6_1746676860886'),
 				color: '#1677ff',
+			},
+			{
+				type: 'slack',
+				name: 'Slack',
+				description: '通过 Slack Incoming Webhook 发送告警通知',
+				color: '#4a154b',
 			},
 			{
 				type: 'workwx',

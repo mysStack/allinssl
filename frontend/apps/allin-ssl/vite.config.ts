@@ -78,7 +78,7 @@ export default defineConfig({
     // i18n生成器
     pluginI18n(),
     // ftp同步
-    ftpSync([
+    process.env.ALLINSSL_DEPLOY_SYNC === "1" && ftpSync([
       // {
       // 	host: '192.168.168.121',
       // 	port: 22,
@@ -97,7 +97,7 @@ export default defineConfig({
       // },
     ]),
     // 项目同步git
-    pluginProjectSyncGit({
+    process.env.ALLINSSL_DEPLOY_SYNC === "1" && pluginProjectSyncGit({
       gitProjects: [
         // {
         // 	repo: 'ssh://git@git.bt.cn:30001/wzz/allinssl.git',
@@ -175,8 +175,13 @@ export default defineConfig({
       "@settings": path.resolve(__dirname, "src/views/settings"),
       "@test": path.resolve(__dirname, "src/views/test"),
       "@api": path.resolve(__dirname, "src/api"),
-      "@assets": path.resolve(__dirname, "src/assets"),
-      "@components": path.resolve(__dirname, "src/components"),
+    "@assets": path.resolve(__dirname, "src/assets"),
+    "@components/DnsProviderSelect": path.resolve(__dirname, "src/components/dnsProviderSelect"),
+    "@components/FlowChart": path.resolve(__dirname, "src/components/flowChart"),
+    "@components/NotifyProviderSelect": path.resolve(__dirname, "src/components/notifyProviderSelect"),
+    "@components/SvgIcon": path.resolve(__dirname, "src/components/svgIcon"),
+    "@components/TypeIcon": path.resolve(__dirname, "src/components/typeIcon"),
+    "@components": path.resolve(__dirname, "src/components"),
       "@public": path.resolve(__dirname, "src/public"),
       "@router": path.resolve(__dirname, "src/router"),
       "@locales": path.resolve(__dirname, "src/locales"),

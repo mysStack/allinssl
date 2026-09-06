@@ -23,6 +23,7 @@ import type {
 	ReportWebhook,
 	ReportDingtalk,
 	ReportWecom,
+	ReportSlack,
 } from '@/types/setting'
 
 const { handleError } = useError()
@@ -67,6 +68,7 @@ export const useSettingsStore = defineStore('settings-store', () => {
 		workwx: $t('t_33_1746773350932'),
 		feishu: $t('t_34_1746773350153'),
 		webhook: 'WebHook',
+		slack: 'Slack',
 	})
 
 	// 邮箱通知渠道表单
@@ -106,6 +108,12 @@ export const useSettingsStore = defineStore('settings-store', () => {
 		enabled: '1',
 		webhook: '', // 钉钉webhook地址
 		secret: '', // 钉钉webhook加密密钥（可选）
+	})
+
+	const slackChannelForm = ref<ReportSlack>({
+		name: '',
+		enabled: '1',
+		webhook: '',
 	})
 
 	// 企业微信通知渠道表单
@@ -271,6 +279,7 @@ export const useSettingsStore = defineStore('settings-store', () => {
 		feishuChannelForm,
 		webhookChannelForm,
 		dingtalkChannelForm,
+		slackChannelForm,
 		wecomChannelForm,
 		aboutInfo,
 

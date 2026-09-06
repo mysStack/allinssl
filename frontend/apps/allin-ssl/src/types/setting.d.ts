@@ -76,6 +76,13 @@ export interface ReportDingtalk {
 	secret: string
 }
 
+/** Slack 通知配置 */
+export interface ReportSlack {
+	name?: string
+	enabled: string
+	webhook: string
+}
+
 /** Webhook通知配置 */
 export interface ReportWebhook {
 	name?: string

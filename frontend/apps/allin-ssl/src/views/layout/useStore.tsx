@@ -72,6 +72,7 @@ export const useLayoutStore = defineStore('layout-store', (): LayoutStoreInterfa
 		wecom: { name: $t('t_33_1746773350932') },
 		feishu: { name: $t('t_34_1746773350153') },
 		webhook: { name: 'WebHook' },
+		slack: { name: 'Slack' },
 	})
 
 	// ==============================

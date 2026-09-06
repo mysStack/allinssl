@@ -5,7 +5,7 @@ import { isDomain, isDomainGroup, isWildcardDomain } from '@baota/utils/business
 import { useStore as useWorkflowViewStore } from '@autoDeploy/children/workflowView/useStore'
 import { $t } from '@locales/index'
 import { useStore } from './useStore'
-import CertificateForm from './components/FreeProductModal'
+import CertificateForm from './components/freeProductModal'
 import DnsProviderSelect from '@components/DnsProviderSelect'
 
 // 错误处理

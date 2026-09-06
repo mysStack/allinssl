@@ -5,5 +5,9 @@
 **/.history
 **/.vscode
 *_test.go
+!backend/internal/report/slack_test.go
+!backend/internal/dns/reader_alidns_test.go
+!backend/internal/dns/credentials_test.go
+!backend/internal/dnsmodel/snapshot_test.go
 *.exe
 *.syso

@@ -100,7 +100,7 @@ go build -o allinssl cmd/main.go
 |--------------|-----------------------------------|
 | DNS验证      | 阿里云、腾讯云、Cloudflare...      |
 | 证书部署     | 宝塔面板、1Panel、阿里云CDN、腾讯云COS |
-| 监控通知     | 邮件、Webhook、钉钉                |
+| 监控通知     | 邮件、Webhook、钉钉、Slack         |
 
 ### ⚙️ 自动化流程
 ```mermaid

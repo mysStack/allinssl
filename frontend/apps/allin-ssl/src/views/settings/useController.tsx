@@ -18,6 +18,7 @@ import FeishuChannelModel from "./components/channel/FeishuChannelModel";
 import WebhookChannelModel from "./components/channel/WebhookChannelModel";
 import DingtalkChannelModel from "./components/channel/DingtalkChannelModel";
 import WecomChannelModel from "./components/channel/WecomChannelModel";
+import SlackChannelModel from "./components/channel/SlackChannelModel";
 import type {
   ReportMail,
   SaveSettingParams,
@@ -214,6 +215,19 @@ export const useController = () => {
     });
   };
 
+  const openAddSlackChannelModal = (limit: number = 1) => {
+    if (limit >= 1) {
+      message.warning("最多只能配置一个 Slack 通知渠道");
+      return;
+    }
+    useModal({
+      title: "添加 Slack 通知",
+      area: 650,
+      component: SlackChannelModel,
+      footer: true,
+    });
+  };
+
   /**
    * 打开添加企业微信通知渠道弹窗
    * @function openAddWecomChannelModal
@@ -322,6 +336,17 @@ export const useController = () => {
         footer: true,
         onClose: () => fetchNotifyChannels(),
       });
+    } else if (item.type === "slack") {
+      useModal({
+        title: "编辑 Slack 通知",
+        area: 650,
+        component: SlackChannelModel,
+        componentProps: {
+          data: item,
+        },
+        footer: true,
+        onClose: () => fetchNotifyChannels(),
+      });
     } else if (item.type === "workwx") {
       useModal({
         title: "编辑企业微信通知",
@@ -349,6 +374,7 @@ export const useController = () => {
       item.type !== "feishu" &&
       item.type !== "webhook" &&
       item.type !== "dingtalk" &&
+      item.type !== "slack" &&
       item.type !== "workwx"
     ) {
       message.warning($t("t_19_1746773352558"));
@@ -359,6 +385,7 @@ export const useController = () => {
       feishu: $t("t_34_1746773350153"),
       webhook: $t("t_3_1748591484673"),
       dingtalk: $t("t_32_1746773348993"),
+      slack: "Slack",
       workwx: $t("t_33_1746773350932"),
     };
     const { open, close } = useLoadingMask({
@@ -417,6 +444,7 @@ export const useController = () => {
     openAddFeishuChannelModal,
     openAddWebhookChannelModal,
     openAddDingtalkChannelModal,
+    openAddSlackChannelModal,
     openAddWecomChannelModal,
     handleEnableChange,
     editChannelConfig,

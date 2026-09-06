@@ -9,6 +9,7 @@ import type {
 	ReportWebhook,
 	ReportDingtalk,
 	ReportWecom,
+	ReportSlack,
 	AddReportParams,
 } from '@/types/setting'
 
@@ -18,6 +19,7 @@ const {
 	webhookChannelForm,
 	dingtalkChannelForm,
 	wecomChannelForm,
+	slackChannelForm,
 	addReportChannel,
 	updateReportChannel,
 } = useStore()
@@ -364,6 +366,58 @@ export const useDingtalkChannelFormController = () => {
 		config,
 		rules,
 		dingtalkChannelForm,
+		submitForm,
+	}
+}
+
+/**
+ * Slack 通知渠道表单控制器
+ */
+export const useSlackChannelFormController = () => {
+	const { open: openLoad, close: closeLoad } = useLoadingMask({ text: $t('t_0_1746667592819') })
+	const rules: FormRules = {
+		name: {
+			required: true,
+			trigger: ['input', 'blur'],
+			message: $t('t_25_1746773349596'),
+		},
+		webhook: {
+			required: true,
+			trigger: ['input', 'blur'],
+			message: '请输入 Slack Webhook 地址',
+		},
+	}
+
+	const config = computed(() => [
+		useFormInput($t('t_2_1745289353944'), 'name'),
+		useFormInput('Slack Webhook 地址', 'webhook'),
+	])
+
+	const submitForm = async (
+		{ config, ...other }: AddReportParams<ReportSlack>,
+		formRef: Ref<FormInst | null>,
+		id?: number,
+	) => {
+		try {
+			openLoad()
+			if (id) {
+				await updateReportChannel({ id, config: JSON.stringify(config), ...other })
+			} else {
+				await addReportChannel({ config: JSON.stringify(config), ...other })
+			}
+			return true
+		} catch (error) {
+			handleError(error)
+			return false
+		} finally {
+			closeLoad()
+		}
+	}
+
+	return {
+		config,
+		rules,
+		slackChannelForm,
 		submitForm,
 	}
 }

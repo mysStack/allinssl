@@ -101,7 +101,7 @@ go build -o allinssl cmd/main.go
 |------------------|---------------------------------------------------------|
 | DNS Validation   | Alibaba Cloud, Tencent Cloud, Cloudflare...             |
 | Certificate Deploy | BaoTa Panel, 1Panel, Alibaba Cloud CDN, Tencent COS  |
-| Monitoring / Alerts | Email, Webhook, DingTalk                            |
+| Monitoring / Alerts | Email, Webhook, DingTalk, Slack                     |
 
 ### ⚙️ Automation Flow
 ```mermaid
