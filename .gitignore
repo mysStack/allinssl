@@ -9,5 +9,8 @@
 !backend/internal/dns/reader_alidns_test.go
 !backend/internal/dns/credentials_test.go
 !backend/internal/dnsmodel/snapshot_test.go
+!backend/internal/dns/service_test.go
+!backend/app/api/dns_test.go
+!backend/middleware/auth_test.go
 *.exe
 *.syso

@@ -123,3 +123,4 @@ export * from "./ca";
 export * from './access'
 export * from './monitor'
 export * from './setting'
+export * from './dns'

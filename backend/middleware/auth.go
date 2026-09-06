@@ -23,7 +23,7 @@ var Html404 = []byte(`<html>
 
 func SessionAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if checkApiKey(c) {
+		if canUseAPIToken(c.Request.URL.Path) && checkApiKey(c) {
 			return
 		}
 
@@ -133,6 +133,10 @@ func SessionAuthMiddleware() gin.HandlerFunc {
 			}
 		}
 	}
+}
+
+func canUseAPIToken(path string) bool {
+	return !strings.HasPrefix(path, "/v1/dns/")
 }
 
 func checkApiKey(c *gin.Context) bool {

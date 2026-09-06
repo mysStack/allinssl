@@ -94,6 +94,13 @@ func Register(r *gin.Engine) {
 		report.POST("/upd_report", api.UpdReport)
 		report.POST("/notify_test", api.NotifyTest)
 	}
+	dns := v1.Group("/dns")
+	{
+		handler := api.NewDNSHandler(api.DefaultDNSService())
+		dns.POST("/get_credentials", handler.GetCredentials)
+		dns.POST("/get_zones", handler.GetZones)
+		dns.POST("/get_snapshot", handler.GetSnapshot)
+	}
 	setting := v1.Group("/setting")
 	{
 		setting.POST("/get_setting", api.GetSetting)

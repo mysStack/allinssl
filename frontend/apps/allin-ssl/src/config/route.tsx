@@ -6,6 +6,7 @@ export default {
     { name: "autoDeploy", title: $t("t_1_1744258113857") },
     { name: "certManage", title: $t("t_2_1744258111238") },
     { name: "certApply", title: $t("t_3_1744258111182") },
+    { name: "dns", title: "DNS解析" },
     { name: "privateCaManage", title: "CA管理" },
     { name: "privateCaCert", title: "私有证书" },
     { name: "authApiManage", title: $t("t_4_1744258111238") },

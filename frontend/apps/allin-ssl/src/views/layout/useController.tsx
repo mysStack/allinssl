@@ -86,6 +86,7 @@ export const useController = (): LayoutControllerExposes => {
       autoDeploy: Flow,
       home: Home,
       certApply: AddSquare24Regular,
+      dns: CloudMonitoring,
       privateCaManage: Certificate20Regular,
       privateCaCert: AddSquare24Regular,
       monitor: CloudMonitoring,

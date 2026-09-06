@@ -1,6 +1,6 @@
 # AllinSSL + DNSControl 第二阶段设计
 
-日期：2026-09-06。状态：已完成本轮源码与离线设计评审，修订为 R1；可进入只读能力和离线组件实施，真实写入仍受验收门槛约束。本文不表示功能已实现或 AliDNS 写入已验证。评审依据见 [设计评审记录](dnscontrol-integration-design-review.md)。
+日期：2026-09-06。状态：R1 已提供 AliDNS 凭据摘要、Zone 列表和完整记录快照的只读 API 与页面；真实写入仍受验收门槛约束。当前页面不会修改任何 DNS 记录，也不调用 DNSControl。评审依据见 [设计评审记录](dnscontrol-integration-design-review.md)。
 
 基线：`upstream/1.1.3`，提交 `73cbcb8a213d959e772fb8ab3120abb9efa476c4`。开发分支：`feature/dnscontrol-adapter`。前置分析：[第一阶段分析](dnscontrol-integration-analysis.md)。保留分析文档中的上游同步规则。
 

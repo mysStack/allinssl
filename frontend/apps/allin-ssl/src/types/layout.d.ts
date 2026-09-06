@@ -108,6 +108,7 @@ export type RouteName =
   | "home"
   | "monitor"
   | "certApply"
+  | "dns"
   | "privateCaManage"
   | "autoDeploy"
   | "authApiManage"
