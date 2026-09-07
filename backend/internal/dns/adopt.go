@@ -282,7 +282,7 @@ func (service *AdoptService) runCreateRecordPreview(job AdoptJob, input CreateRe
 		return service.finishChange(job.ID, JobFailed, "", ChangeSummary{}, "DNS_WORKER_TIMEOUT")
 	}
 	planHash := previewPlanHash(plan)
-	summary, valid := summarizeCreateRecordPlan(plan, job.Zone)
+	summary, valid := summarizeCreateRecordPlan(plan, job.Zone, record)
 	if !valid {
 		return service.finishChange(job.ID, JobBlocked, planHash, ChangeSummary{}, "DNS_PREVIEW_PLAN_INVALID")
 	}
@@ -366,19 +366,40 @@ func createRecordPreviewRequestHash(input CreateRecordPreviewInput) (string, err
 	return hex.EncodeToString(digest[:]), nil
 }
 
-func summarizeCreateRecordPlan(plan dnscontrol.PreviewPlan, zone string) (ChangeSummary, bool) {
-	if plan.Zone != zone || plan.Provider != "ALIDNS" || plan.Corrections <= 0 || len(plan.Details) == 0 {
+func summarizeCreateRecordPlan(plan dnscontrol.PreviewPlan, zone string, candidate dnsmodel.Record) (ChangeSummary, bool) {
+	if plan.Zone != zone || plan.Provider != "ALIDNS" || plan.Corrections != 1 || len(plan.Details) != 1 {
 		return ChangeSummary{}, false
 	}
-	details := make([]string, 0, len(plan.Details))
-	for _, detail := range plan.Details {
-		if !safeSummaryText(detail, 4096) {
-			return ChangeSummary{}, false
-		}
-		digest := sha256.Sum256([]byte(detail))
-		details = append(details, "sha256:"+hex.EncodeToString(digest[:]))
+	detail := plan.Details[0]
+	if !matchesCreateRecordDetail(detail, zone, candidate) {
+		return ChangeSummary{}, false
 	}
-	return ChangeSummary{Corrections: plan.Corrections, Details: details}, true
+	digest := sha256.Sum256([]byte(detail))
+	return ChangeSummary{Corrections: 1, Details: []string{"sha256:" + hex.EncodeToString(digest[:])}}, true
+}
+
+func matchesCreateRecordDetail(detail, zone string, candidate dnsmodel.Record) bool {
+	if !safeSummaryText(detail, 4096) {
+		return false
+	}
+	fields := strings.Split(detail, " ")
+	if len(fields) != 4 || fields[0] != "CREATE" || !strings.HasSuffix(fields[1], ".") || fields[3] != candidate.Value {
+		return false
+	}
+	recordType := strings.ToUpper(fields[2])
+	if recordType != candidate.Type {
+		return false
+	}
+	detailRecord := candidate
+	detailRecord.Name = fields[1]
+	detailRecord.Type = recordType
+	normalized, err := dnsmodel.BuildSnapshot(zone, []dnsmodel.Record{detailRecord}, dnsmodel.Limits{
+		MinTTL: 600,
+		MaxTTL: 86400,
+		Known:  true,
+	})
+	return err == nil && normalized.Compatible && len(normalized.Records) == 1 &&
+		normalized.Records[0].Name == candidate.Name && normalized.Records[0].Type == candidate.Type
 }
 
 func safeSummaryText(value string, maximumBytes int) bool {

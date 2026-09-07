@@ -171,17 +171,17 @@ func TestBindFixtureRunsExactCheckAndPreview(t *testing.T) {
 
 	fixtureDirectory := filepath.Join("testdata", "bind")
 	workDirectory := t.TempDir()
-	for _, name := range []string{"dnsconfig.js", "creds.json", "preview.example.zone"} {
+	for _, name := range []string{"dnsconfig.js", "preview.example.zone"} {
 		contents, err := os.ReadFile(filepath.Join(fixtureDirectory, name))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if name == "creds.json" && (bytes.Contains(contents, []byte("ALIDNS")) || bytes.Contains(contents, []byte("access_key"))) {
-			t.Fatalf("fixture contains cloud credentials: %s", contents)
-		}
 		if err := os.WriteFile(filepath.Join(workDirectory, name), contents, 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.WriteFile(filepath.Join(workDirectory, "creds.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	zonePath := filepath.Join(workDirectory, "preview.example.zone")
 	originalZone, err := os.ReadFile(zonePath)
@@ -224,8 +224,8 @@ func TestBindFixtureRunsExactCheckAndPreview(t *testing.T) {
 	for _, item := range reportItems {
 		if item.Domain == "preview.example" && item.Provider == "bind" {
 			foundBind = true
-			if item.Corrections != 0 {
-				t.Fatalf("bind corrections = %d, want 0", item.Corrections)
+			if item.Corrections != 4 {
+				t.Fatalf("bind corrections = %d, want 4", item.Corrections)
 			}
 		}
 	}

@@ -193,7 +193,7 @@ func TestCreateRecordPreviewPersistsSafeSummaryAndUsesFullFreshSnapshot(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	rawDetail := "CREATE api.example.com A 192.0.2.20"
+	rawDetail := "CREATE Api.Example.com. a 192.0.2.20"
 	previewer := &fakePreviewer{plan: dnscontrol.PreviewPlan{
 		Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{rawDetail},
 	}}
@@ -218,7 +218,7 @@ func TestCreateRecordPreviewPersistsSafeSummaryAndUsesFullFreshSnapshot(t *testi
 		t.Fatalf("candidate summary = %#v", job.CandidateRecord)
 	}
 	if job.ChangeSummary.Corrections != 1 || len(job.ChangeSummary.Details) != 1 ||
-		job.ChangeSummary.Details[0] != "sha256:353db4e087eac352c971aadbc0a7e11fee75000908e04104a26a90f5aad79dca" ||
+		job.ChangeSummary.Details[0] != "sha256:04b8e77b13444108e55a00708bee84206f6de1b01b4328663ca1edb7d0f64683" ||
 		strings.Contains(job.ChangeSummary.Details[0], rawDetail) {
 		t.Fatalf("unsafe change summary = %#v", job.ChangeSummary)
 	}
@@ -234,7 +234,7 @@ func TestCreateRecordPreviewPersistsSafeSummaryAndUsesFullFreshSnapshot(t *testi
 func TestCreateRecordPreviewPersistsOnlyValidatedCanonicalCandidateSummary(t *testing.T) {
 	snapshot := testSnapshot(t)
 	previewer := &fakePreviewer{plan: dnscontrol.PreviewPlan{
-		Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"create"},
+		Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"CREATE api.example.com. A 192.0.2.20"},
 	}}
 	service := newAdoptService(t, fakeSnapshotReader{snapshot: snapshot}, previewer)
 	markZoneAdopted(t, service, 1, snapshot.SnapshotHash)
@@ -326,7 +326,7 @@ func TestCreateRecordPreviewRejectsPlanReturnedAfterWorkerCancellation(t *testin
 	snapshot := testSnapshot(t)
 	previewer := &fakePreviewer{
 		returnAfterCancel: true,
-		plan:              dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"create"}},
+		plan:              dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"CREATE api.example.com. A 192.0.2.20"}},
 	}
 	service := newAdoptService(t, fakeSnapshotReader{snapshot: snapshot}, previewer)
 	service.workerTimeout = testWorkerTimeout
@@ -576,17 +576,35 @@ func TestCreateRecordPreviewBlocksFreshSnapshotDriftAndIncompatibility(t *testin
 }
 
 func TestCreateRecordPreviewRejectsUnsafeProviderPlans(t *testing.T) {
+	matchingDetail := "CREATE api.example.com. A 192.0.2.20"
 	for _, test := range []struct {
 		name string
 		plan dnscontrol.PreviewPlan
 	}{
-		{name: "wrong zone", plan: dnscontrol.PreviewPlan{Zone: "other.example", Provider: "ALIDNS", Corrections: 1, Details: []string{"create"}}},
-		{name: "wrong provider", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "BIND", Corrections: 1, Details: []string{"create"}}},
-		{name: "zero corrections", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 0, Details: []string{"create"}}},
-		{name: "negative corrections", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: -1, Details: []string{"create"}}},
+		{name: "wrong zone", plan: dnscontrol.PreviewPlan{Zone: "other.example", Provider: "ALIDNS", Corrections: 1, Details: []string{matchingDetail}}},
+		{name: "wrong provider", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "BIND", Corrections: 1, Details: []string{matchingDetail}}},
+		{name: "zero corrections", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 0, Details: []string{matchingDetail}}},
+		{name: "negative corrections", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: -1, Details: []string{matchingDetail}}},
 		{name: "missing details", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1}},
 		{name: "blank detail", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{" \t"}}},
 		{name: "invalid utf8 detail", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{string([]byte{0xff})}}},
+		{name: "unknown output", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"create"}}},
+		{name: "missing owner and type", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"CREATE"}}},
+		{name: "missing type", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"CREATE api.example.com."}}},
+		{name: "missing payload", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"CREATE api.example.com. A"}}},
+		{name: "double separator", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"CREATE  api.example.com. A 192.0.2.20"}}},
+		{name: "delete", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"DELETE api.example.com. A 192.0.2.20"}}},
+		{name: "modify", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"MODIFY api.example.com. A 192.0.2.20"}}},
+		{name: "ttl change", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"TTL api.example.com. A 600 -> 300"}}},
+		{name: "unrelated owner", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"CREATE other.example.com. A 192.0.2.20"}}},
+		{name: "wrong type", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"CREATE api.example.com. AAAA 2001:db8::1"}}},
+		{name: "relative owner", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"CREATE api A 192.0.2.20"}}},
+		{name: "wrong payload", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"CREATE api.example.com. A 192.0.2.30"}}},
+		{name: "extra token", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"CREATE api.example.com. A 192.0.2.20 unexpected"}}},
+		{name: "count mismatch", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 2, Details: []string{matchingDetail}}},
+		{name: "detail count mismatch", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{matchingDetail, matchingDetail}}},
+		{name: "extra detail", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 2, Details: []string{matchingDetail, "CREATE other.example.com. A 192.0.2.30"}}},
+		{name: "duplicate detail", plan: dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 2, Details: []string{matchingDetail, matchingDetail}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			snapshot := testSnapshot(t)
@@ -612,7 +630,7 @@ func TestCreateRecordPreviewRejectsUnsafeProviderPlans(t *testing.T) {
 func TestCreateRecordPreviewIdempotencyReplaysSameRequestAndRejectsChanges(t *testing.T) {
 	snapshot := testSnapshot(t)
 	previewer := &fakePreviewer{plan: dnscontrol.PreviewPlan{
-		Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"create"},
+		Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"CREATE api.example.com. A 192.0.2.20"},
 	}}
 	service := newAdoptService(t, fakeSnapshotReader{snapshot: snapshot}, previewer)
 	markZoneAdopted(t, service, 1, snapshot.SnapshotHash)
