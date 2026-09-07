@@ -1,6 +1,6 @@
 # AllinSSL + DNSControl 第二阶段设计
 
-日期：2026-09-06。状态：R1 已提供 AliDNS 凭据摘要、Zone 列表和完整记录快照的只读 API 与页面；真实写入仍受验收门槛约束。当前页面不会修改任何 DNS 记录，也不调用 DNSControl。评审依据见 [设计评审记录](dnscontrol-integration-design-review.md)。
+日期：2026-09-06，2026-09-07 更新。状态：已提供 AliDNS 只读快照、零差异纳管 Preview 和单条创建记录 Preview；真实 DNS 写入仍未实现、未开放。评审依据见 [设计评审记录](dnscontrol-integration-design-review.md)。
 
 基线：`upstream/1.1.3`，提交 `73cbcb8a213d959e772fb8ab3120abb9efa476c4`。开发分支：`feature/dnscontrol-adapter`。前置分析：[第一阶段分析](dnscontrol-integration-analysis.md)。保留分析文档中的上游同步规则。
 
@@ -20,6 +20,35 @@ MVP 提供 AliDNS Zone 读取、完整快照导入、业务记录增改删、Pre
 | 验证 | 离线 fixture → 专用 AliDNS Zone → 人工评审开放写入；默认仅允许读取和预览 |
 
 不包含 Zone 创建/删除、注册商或 Zone 顶点 NS 委派变更、解析线路/权重/停启用、跨 Zone 批处理、自动 Apply、工作流与证书联动、多用户 RBAC。子域 NS 作为候选业务类型仍需专用 Zone 验收，不能修改顶点 NS。上述能力不能通过客户端隐藏字段绕过限制。
+
+### 1.1 已确认的下一实施批次：Preview 基础设施
+
+本批只实现 `backend/internal/dnscontrol` 的离线 Preview 基础设施，为后续安全接入 API、任务和 UI 奠定可测试边界：
+
+- 固定调用 `/home/bruce/.local/bin/dnscontrol-5.0.3`（开发）或 `/usr/local/bin/dnscontrol`（生产），并严格检查版本为 `v5.0.3`。
+- 从已校验的完整 `dnsmodel.Snapshot` 生成稳定的 AliDNS DSL、凭据 JSON 和 `check` / `preview` 所需的受控参数数组；不接受前端提供的脚本、路径、flag 或密钥。
+- 使用独立任务目录、显式 `0700` 目录和 `0600` 文件权限，限制超时、输出和报告大小，并保证所有失败路径清理临时凭据。
+- 以脱敏的 BIND fixture 和进程替身测试版本检查、参数组合、文件权限、报告解析和失败处理；不访问真实 AliDNS 授权或 DNS Zone。
+
+本批明确不新增 HTTP 路由、前端 Preview 页面、数据库任务表、确认令牌或 `push` 调用；不提供任何能触发真实 DNS 写入的代码路径。下一批先完成任务持久化、专用会话/CSRF、远端漂移校验与 Preview 页面，最后才在默认关闭的写开关后增加 Apply，并以专用 AliDNS 测试 Zone 验收。
+
+#### Preview 基础设施实施状态
+
+本批已完成离线 `backend/internal/dnscontrol` 基础设施：版本检查固定为 `dnscontrol v5.0.3`；生成器从兼容的完整 Snapshot 产生确定性 DSL 与独立凭据文件；工作目录与三个临时文件分别为 `0700` 和 `0600`；Preview 仅执行 `check` 与 `preview`。实测 `v5.0.3` 的 `check` 不接受 `--creds`，故固定为 `check --config <path>`；`preview` 使用受限凭据文件和 `--no-colors --domains <zone> --cmode none --no-populate --report <path>`。
+
+本机已通过 `go test ./backend/internal/dnscontrol ./backend/internal/dnsmodel -count=1`、`go test ./backend/internal/dns ./backend/app/api ./backend/middleware -count=1` 与 `go build -o /tmp/allinssl-dnscontrol-preview ./cmd/main.go`。BIND 本地 fixture 在精确 `v5.0.3` 下完成零差异 `check`/`preview`，不含云凭据且不会改写 fixture Zone。生产适配器没有 `push` 调用、`Push` 方法、HTTP 路由、前端、数据库或真实 Provider 访问；这些能力仍保持未实现、未开放状态。
+
+固定 DSL 使用 `REG_NONE` 时，`v5.0.3` report 会输出同一 Zone 的一个 `ALIDNS` Provider 项和一个零差异 `registrar: none` 项。解析器仅接受这两个精确项目，不接受额外 Provider、注册商、错误 Zone 或非零注册商差异。
+
+### 1.2 后续实施拆分
+
+为避免把数据库、会话安全、预览页面和真实写入混在同一批，后续按三个独立评审批次推进：
+
+1. 安全纳管预览：DNS 专用 Session/CSRF、SQLite Zone/任务/锁/审计、`get_health`、`bind_zone` 和 `get_job`。仅验证完整 Zone 的零差异 Preview，不编辑记录、不 `push`、不新增页面。
+2. 记录变更预览：在已纳管 Zone 上实现完整快照差异规划、增改删的 Preview API 与页面展示，仍不允许确认或写入。
+3. 确认与执行：确认令牌、二次漂移校验、受默认关闭写开关保护的 `push` 和结果核对。该批必须在专用 AliDNS Zone 验收后单独批准。
+
+批次一的完整安全设计见 [安全纳管预览设计](../superpowers/specs/2026-09-07-dnscontrol-adopt-preview-design.md)。本批不会因为已有 Reader 或离线 Preview 组件而访问真实 Provider 进行测试，也不会开放 DNS 写入。
 
 ## 2. 源码依据与兼容性边界
 
@@ -129,7 +158,7 @@ IGNORE("@", "NS,SOA"),
 
 保护 ACME 名称的所有类型同时覆盖 TXT 与常见 CNAME 委派。不能把这些记录也加入候选 DSL；请求若触及保护名直接拒绝。委派到非标准名称的 ACME 写入目标无法由前缀自动识别，相关 Zone 在明确并验证额外固定保护规则之前保持只读。
 
-生成流程：完整基线 → 验证单条请求 → 修改对应 RRset → 保留全部其余业务记录 → 排除保护记录 → 添加固定 IGNORE → 稳定排序与安全序列化。禁止前端传入 DSL、原始 JavaScript 或自定义 IGNORE。禁止 `DISABLE_IGNORE_SAFETY_CHECK`。DNSControl `check` 通过只是语法条件，不能证明不会误删。
+生成流程：完整基线 → 验证单条请求 → 修改对应 RRset → 保留全部其余业务记录 → 排除保护记录 → 添加固定 IGNORE → 稳定排序与安全序列化。禁止前端传入 DSL、原始 JavaScript 或自定义 IGNORE。禁止 `DISABLE_IGNORE_SAFETY_CHECK`。固定 `v5.0.3` 的 `check` 命令只接受 `--config`，不接受 `--creds`；它只证明 DSL 语法和配置有效，不能证明不会误删。
 
 `NO_PURGE` 不能作为通用 CRUD 方案：它会保留从候选中删除的记录，导致显式删除无法完成。MVP 采用完整快照加固定保护规则，删除必须是用户明确选中的旧记录；任何额外删改均阻止执行。
 
@@ -142,7 +171,7 @@ IGNORE("@", "NS,SOA"),
 1. 验证 DNS 会话、CSRF、Zone 纳管状态、请求格式与幂等键；解析 Aliyun 凭据并生成内部凭据指纹。
 2. 事务内创建 job 并抢占规范化 Zone 锁。锁以 provider+zone 唯一，不以 credential_id 唯一，避免同 Zone 多授权并发。
 3. 完整重读，验证客户端 `base_snapshot_hash` 与 `before`；不匹配返回 `REMOTE_DRIFT`。
-4. 生成不可变候选并运行 `check`、`preview`。每个命令必须单独确认启动成功、未超时、退出码为 0；preview 还需确认本次新建 report 存在且完整。再解析每个 report 项，校验 Zone、Provider、注册商、行数和详情。非零退出但 report 显示 0 corrections 的情况必须失败，不能成为零差异纳管或 no_change。
+4. 生成不可变候选并运行 `check`、`preview`。每个命令必须单独确认启动成功、未超时、退出码为 0；preview 还需确认本次新建 report 存在且完整。再解析每个 report 项，校验 Zone、Provider、注册商、行数和详情。对固定 `REG_NONE` 配置，DNSControl `v5.0.3` 会输出一个 `ALIDNS` Provider 项及一个 `none` 注册商零差异项；任何额外、缺失或不匹配的项都必须失败。非零退出但 report 显示 0 corrections 的情况必须失败，不能成为零差异纳管或 no_change。
 5. 将 report 规范化为完整变化集合，与后端根据 before/after 推导的允许变化集合比较。Provider 可把更新表示为删除加新增，必须有固定 fixture 证明这种映射；不能只比较 correction 数量。
 6. 出现未知行、跨 Zone、额外删除、保护记录变化、TTL 自动修正或不完整输出时转 `blocked`；保留脱敏诊断，禁止确认。
 7. 无差异转 `no_change`；否则保存快照、候选与计划 hash，签发一次性随机确认 token，进入 `awaiting_confirmation`，5 分钟后失效。
@@ -287,3 +316,32 @@ R1 增补回归：preview 退出非零但 JSON corrections=0；BIND 保护说明
 本增量没有修改 DNSControl 写入执行器、数据库 schema、HTTP/API/UI、镜像或开关；没有运行真实 AliDNS 查询、preview 或 push。离线 mock/隔离测试不等同于真实 Provider 验收，完整包测试仍依赖可用的 Go 模块下载环境。
 
 本轮评审已修正读取与执行结果判定、生命周期和接入顺序方面的缺口，可进入第一批只读能力及离线组件实施。全 Zone 纳管、单一业务写入方和 delete-then-create 是写入开放前必须向使用者明确的限制。DNSControl 原始 CLI 缺少原子计划执行能力是明确保留的技术边界，如未来必须支持业务多写入方，需要重新设计执行契约，不能通过缩短预览有效期宣称消除竞态。
+
+## 14. 安全纳管预览实施状态
+
+已完成本轮仅后端的安全纳管预览基础：AllinSSL 前端只调用本应用 API，后端才调用服务器本地 DNSControl 二进制；没有新增 DNSControl HTTP 服务，也不允许浏览器传入二进制路径、参数、DSL 或云凭据。
+
+- 成功登录会轮换 DNS 专用 `actor`、会话标识、登录代次和 CSRF token；登出会清除它们。`/v1/dns` 仅接受已登录 Session，拒绝 `api_token`，且请求预处理在全局鉴权解析表单之前限制为 `application/x-www-form-urlencoded` 和 64 KiB。
+- `bind_zone` 只创建异步纳管任务，要求同源 Origin、CSRF、完整快照 hash、`adopt_all=true` 与幂等键。SQLite 持久化 Zone 锁、任务、审计和幂等键；同一 Zone 的活动任务不会并发运行。
+- worker 完整重读 Zone，再用内部凭据生成受控 Artifacts，固定执行 DNSControl `version`、`check` 和 `preview`。服务初始化时先以 `0700` 创建并校验本地 DNSControl 工作根目录，避免健康检查因 CLI 工作目录不存在而被误判为不可用。只有 Zone、Provider `ALIDNS` 且 corrections 为零时才写入本地 `adopted` 摘要；漂移、非兼容记录、CLI 错误或非零差异均终止为 `blocked`/`failed`。
+- 已提供 `POST /v1/dns/get_health`、`POST /v1/dns/bind_zone` 和 `POST /v1/dns/get_job`；响应不包含 AccessKey、DSL、报告原文、临时路径或确认 token。现有读取端点继续可用。
+
+前端页面现已接入这三条受控 API：先选择授权和 Zone 并读取完整快照；只有 Snapshot 兼容且 `get_health` 表示 Preview 可用时，才启用“纳管预览”。二次确认后页面提交当前 `snapshot_hash`、`adopt_all=true`、幂等键和 DNS CSRF token，轮询 `get_job` 显示 `queued`、`previewing`、`adopted`、`blocked` 或 `failed`。页面离开会停止浏览器轮询，不取消后端任务。
+
+该交互仅用于零差异纳管验证：按钮和确认文案均明确不会修改 DNS 记录，也不会调用 `push`。快照不兼容、DNSControl Preview 不可用或任务被阻断时，前端保持只读并展示原因；不会提供记录编辑、确认写入或重试写入入口。
+
+本批仍未实现记录编辑、确认令牌、`push`、真实 AliDNS Provider 验收或自动重试。DNS 写入仍关闭；下一批必须单独设计、评审和授权。
+
+## 15. 创建解析记录 Preview 实施状态
+
+已完成在安全纳管基础上的单条创建记录 Preview。入口只对当前已选择授权和 Zone、完整 Snapshot 兼容、DNSControl `v5.0.3` 健康且同一授权、同一 Zone、同一 Snapshot 已成功纳管的上下文开放；前端禁用仅用于体验，后端会重新读取并校验全部条件。
+
+- 支持 `A`、`AAAA`、`CNAME`、`TXT`、`MX`、`SRV`、`CAA`。TTL 限制为 `600` 至 `86400`；MX 使用 priority，SRV 使用 priority/weight/port，CAA 使用 flags/tag。线路固定 `default`，状态固定 `ENABLE`，客户端不能覆盖。
+- `POST /v1/dns/create_record_preview` 只接受受控表单字段、幂等键和 DNS CSRF；DNS 专用 Secure 绑定 Cookie、当前登录代次与显式同源 Origin 必须同时有效，`api_token` 不能授权该接口。请求预处理在表单解析前执行 content type 与 64 KiB 限制。
+- worker 在持久化 Zone 锁内重读完整 Snapshot，比对 `base_snapshot_hash`、纳管授权和兼容性，再把规范化的新记录合入完整候选。它保留其余业务记录及固定 ACME、顶点 NS/SOA 保护规则，并复用 `BuildSnapshot` 拒绝重复、CNAME/Null MX 冲突及不可表达记录。
+- DNSControl 只执行受控 `check` 和 `preview`。成功必须是目标 Zone、`ALIDNS` Provider、恰好一条匹配候选 owner/type 的 `CREATE`；未知、删除、跨 Zone、Provider 不符、非正 corrections 或其他差异均阻断。
+- job 使用 `kind=create_record_preview` 和终态 `previewed`，`get_job` 只返回候选名称/类型/TTL、计划哈希、散列后的变化详情及错误码。UI 收到成功终态后保留原只读 Snapshot，不在本地插入记录。
+
+页面提供动态“添加记录”弹窗，固定展示默认线路和启用状态，唯一提交动作是“创建预览”。成功提示为“预览已生成，未修改 DNS，Push 尚未开放”。当前生产代码没有确认 token、Apply、`dnscontrol push` 或 AliDNS 写 API 路径；fixture、mock 和真实服务器注册链测试均不读取真实凭据或访问真实 DNS。
+
+未来 Push 必须作为独立阶段，先完成一次性确认令牌、执行前再次重读与 Preview、计划等价校验、执行后核对和默认关闭的全局写开关，并在专用 AliDNS 测试 Zone 使用专用最小权限凭据验收。当前离线/BIND 与 fake Provider 结果不能替代该验收，也不能据此开放写入。

@@ -220,3 +220,11 @@ ChangeRequest 至少绑定：`credential_id`、`zone`、`operation`、内部 Rec
 AllinSSL 现有 `GetAllAccess` 直接返回包含 `config` 的授权数据，DNS 页面必须使用只返回授权摘要的新接口。登录 session 当前只保存登录标记和登录校验信息，没有用户 ID；DNS job 的发起身份及确认会话需由新增 DNS 鉴权逻辑建立，不能直接假定可复用多用户身份模型。
 
 本轮 [设计评审](dnscontrol-integration-design-review.md) 还确认：AliDNS 修改（含 TTL-only）采用先删后建，可能短暂缺失并改变 Provider ID；CLI preview 失败也可能输出 corrections=0 的 JSON，必须先验证进程状态；BIND report 可包含保护说明，文本行数不等于业务变更数。DNS 专用会话需在成功登录/登出时显式轮换/失效，前端开发请求不能沿用自动追加 api_token 的通用分支。以上已纳入 R1 设计及测试门槛。
+
+## 2026-09-07 实施范围复核
+
+当前分支已从分析阶段推进到只读 Snapshot、零差异纳管 Preview 和单条创建记录 Preview。创建入口仅支持 `A`、`AAAA`、`CNAME`、`TXT`、`MX`、`SRV`、`CAA`，固定默认线路与启用状态；后端基于完整远端 Snapshot 构造候选，并再次校验快照哈希、兼容性、同授权纳管状态、保护名称和 DNSControl 报告语义。浏览器只提交结构化表单，不传 DSL、命令参数、路径或 Provider 凭据。
+
+安全链已在真实 Gin 注册路径验证：成功登录创建并轮换 DNS 身份、CSRF 和 `/v1/dns` 范围的 Secure/HttpOnly/SameSite=Strict 绑定 Cookie；旧绑定失效；DNS 状态变更路由要求显式同源和 CSRF；JSON、超限表单及 query/form `api_token` 在业务处理器前被拒绝。测试使用临时 SQLite、fixture 和 fake 依赖，没有读取真实数据或访问 AliDNS。
+
+本阶段仅生成并展示 DNSControl Preview，成功状态为 `previewed`。没有确认令牌、Apply、AliDNS SDK 写调用或 `dnscontrol push`，也没有乐观修改前端 Snapshot。真实 Provider 的外部并发、AliDNS 对 Preview 详情的实际格式、delete-then-create 可用性和执行后传播仍未验收；任何未来 Push 都必须在专用 Zone、专用最小权限凭据和默认关闭写开关下单独设计、评审与批准。
