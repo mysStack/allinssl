@@ -231,6 +231,26 @@ func TestCreateRecordPreviewPersistsSafeSummaryAndUsesFullFreshSnapshot(t *testi
 	}
 }
 
+func TestCreateRecordPreviewAcceptsTXTValueContainingSpaces(t *testing.T) {
+	snapshot := testSnapshot(t)
+	value := "v=spf1 include:mail.example.com ~all"
+	previewer := &fakePreviewer{plan: dnscontrol.PreviewPlan{
+		Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"CREATE txt.example.com. TXT " + value},
+	}}
+	service := newAdoptService(t, fakeSnapshotReader{snapshot: snapshot}, previewer)
+	markZoneAdopted(t, service, 1, snapshot.SnapshotHash)
+	input := createRecordPreviewInput(snapshot, "record-txt-with-spaces")
+	input.Record = CreateRecordInput{Name: "txt", Type: "TXT", TTL: 600, Value: value}
+
+	job, err := service.StartCreateRecordPreview(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != JobPreviewed {
+		t.Fatalf("job = %#v", job)
+	}
+}
+
 func TestCreateRecordPreviewPersistsOnlyValidatedCanonicalCandidateSummary(t *testing.T) {
 	snapshot := testSnapshot(t)
 	previewer := &fakePreviewer{plan: dnscontrol.PreviewPlan{

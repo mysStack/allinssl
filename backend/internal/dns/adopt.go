@@ -382,7 +382,7 @@ func matchesCreateRecordDetail(detail, zone string, candidate dnsmodel.Record) b
 	if !safeSummaryText(detail, 4096) {
 		return false
 	}
-	fields := strings.Split(detail, " ")
+	fields := strings.SplitN(detail, " ", 4)
 	if len(fields) != 4 || fields[0] != "CREATE" || !strings.HasSuffix(fields[1], ".") || fields[3] != candidate.Value {
 		return false
 	}
