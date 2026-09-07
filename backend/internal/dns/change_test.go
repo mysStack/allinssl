@@ -125,3 +125,87 @@ func TestBuildCreateRecordCandidateRejectsProtectedAndIncompatibleRecords(t *tes
 		})
 	}
 }
+
+func TestBuildCreateRecordCandidateRejectsUnsupportedTypesAndAbsoluteACME(t *testing.T) {
+	snapshot := createRecordSnapshot(t, createRecordFixture())
+
+	for _, testCase := range []struct {
+		name  string
+		input CreateRecordInput
+		want  error
+	}{
+		{
+			name: "NS", input: CreateRecordInput{Name: "delegated", Type: "NS", TTL: 600, Value: "ns1.example.net."}, want: ErrInvalidChange,
+		},
+		{
+			name: "unsupported type", input: CreateRecordInput{Name: "api", Type: "HTTPS", TTL: 600, Value: "1 ."}, want: ErrInvalidChange,
+		},
+		{
+			name: "absolute ACME challenge", input: CreateRecordInput{Name: "_acme-challenge.example.com.", Type: "TXT", TTL: 600, Value: "token"}, want: ErrProtectedRecord,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, _, err := BuildCreateRecordCandidate(snapshot, testCase.input)
+			if !errors.Is(err, testCase.want) {
+				t.Fatalf("err = %v, want %v", err, testCase.want)
+			}
+		})
+	}
+}
+
+func TestBuildCreateRecordCandidateAcceptsDocumentedBoundaries(t *testing.T) {
+	providerLimits := dnsmodel.Limits{MinTTL: 1200, MaxTTL: 1200, Known: true}
+	providerLimited, err := dnsmodel.BuildSnapshot("example.com", nil, providerLimits)
+	if err != nil || !providerLimited.Compatible {
+		t.Fatalf("provider-limited snapshot = %#v, err = %v", providerLimited, err)
+	}
+
+	for _, testCase := range []struct {
+		name     string
+		snapshot dnsmodel.Snapshot
+		input    CreateRecordInput
+		wantErr  error
+	}{
+		{
+			name: "maximum documented TTL", snapshot: createRecordSnapshot(t),
+			input: CreateRecordInput{Name: "ttl-max", Type: "A", TTL: 86400, Value: "192.0.2.10"},
+		},
+		{
+			name: "effective provider TTL intersection", snapshot: providerLimited,
+			input: CreateRecordInput{Name: "provider-ttl", Type: "A", TTL: 1200, Value: "192.0.2.10"},
+		},
+		{
+			name: "provider TTL above intersection", snapshot: providerLimited,
+			input: CreateRecordInput{Name: "provider-ttl", Type: "A", TTL: 1201, Value: "192.0.2.10"}, wantErr: ErrInvalidChange,
+		},
+		{
+			name: "SRV zero numeric fields", snapshot: createRecordSnapshot(t),
+			input: CreateRecordInput{Name: "_sip._tcp", Type: "SRV", TTL: 600, Value: "service.example.net.", Priority: createRecordInt64(0), Weight: createRecordInt64(0), Port: createRecordInt64(0)},
+		},
+		{
+			name: "SRV maximum numeric fields", snapshot: createRecordSnapshot(t),
+			input: CreateRecordInput{Name: "_sip._tcp", Type: "SRV", TTL: 600, Value: "service.example.net.", Priority: createRecordInt64(65535), Weight: createRecordInt64(65535), Port: createRecordInt64(65535)},
+		},
+		{
+			name: "CAA zero flag", snapshot: createRecordSnapshot(t),
+			input: CreateRecordInput{Name: "caa-zero", Type: "CAA", TTL: 600, Value: "letsencrypt.org", CAAFlags: createRecordInt64(0), CAATag: "issue"},
+		},
+		{
+			name: "CAA maximum flag", snapshot: createRecordSnapshot(t),
+			input: CreateRecordInput{Name: "caa-maximum", Type: "CAA", TTL: 600, Value: "letsencrypt.org", CAAFlags: createRecordInt64(255), CAATag: "issue"},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			candidate, record, err := BuildCreateRecordCandidate(testCase.snapshot, testCase.input)
+			if testCase.wantErr != nil {
+				if !errors.Is(err, testCase.wantErr) {
+					t.Fatalf("candidate = %#v, record = %#v, err = %v, want %v", candidate, record, err, testCase.wantErr)
+				}
+				return
+			}
+			if err != nil || !candidate.Compatible || len(candidate.Records) != len(testCase.snapshot.Records)+1 {
+				t.Fatalf("candidate = %#v, record = %#v, err = %v", candidate, record, err)
+			}
+		})
+	}
+}

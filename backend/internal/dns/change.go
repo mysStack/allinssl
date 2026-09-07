@@ -21,10 +21,18 @@ type CreateRecordInput struct {
 }
 
 func BuildCreateRecordCandidate(snapshot dnsmodel.Snapshot, input CreateRecordInput) (dnsmodel.Snapshot, dnsmodel.Record, error) {
+	recordType := strings.ToUpper(strings.TrimSpace(input.Type))
+	if protectedCreateRecord(snapshot.Zone, input.Name, recordType) {
+		return dnsmodel.Snapshot{}, dnsmodel.Record{}, ErrProtectedRecord
+	}
+	if !createRecordTypeAllowed(recordType) {
+		return dnsmodel.Snapshot{}, dnsmodel.Record{}, ErrInvalidChange
+	}
+
 	record := dnsmodel.Record{
 		ProviderRecordID: createRecordMarker,
 		Name:             input.Name,
-		Type:             input.Type,
+		Type:             recordType,
 		TTL:              input.TTL,
 		Value:            input.Value,
 		Priority:         input.Priority,
@@ -35,10 +43,6 @@ func BuildCreateRecordCandidate(snapshot dnsmodel.Snapshot, input CreateRecordIn
 		Line:             "default",
 		Status:           "ENABLE",
 	}
-	if protectedCreateRecord(snapshot.Zone, record) {
-		return dnsmodel.Snapshot{}, dnsmodel.Record{}, ErrProtectedRecord
-	}
-
 	records := append(append([]dnsmodel.Record(nil), snapshot.Records...), record)
 	candidate, err := dnsmodel.BuildSnapshot(snapshot.Zone, records, snapshot.Limits)
 	if err != nil || !candidate.Compatible {
@@ -71,14 +75,35 @@ func BuildCreateRecordCandidate(snapshot dnsmodel.Snapshot, input CreateRecordIn
 	return candidate, normalized, nil
 }
 
-func protectedCreateRecord(zone string, record dnsmodel.Record) bool {
-	name := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(record.Name), "."))
-	zone = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(zone), "."))
-	if name == zone {
-		name = "@"
+func protectedCreateRecord(zone, owner, recordType string) bool {
+	name := normalizeCreateOwner(zone, owner)
+	return name == "_acme-challenge" || strings.HasPrefix(name, "_acme-challenge.") || (name == "@" && (recordType == "NS" || recordType == "SOA"))
+}
+
+func createRecordTypeAllowed(recordType string) bool {
+	switch recordType {
+	case "A", "AAAA", "CNAME", "TXT", "MX", "SRV", "CAA":
+		return true
+	default:
+		return false
 	}
-	typ := strings.ToUpper(strings.TrimSpace(record.Type))
-	return name == "_acme-challenge" || strings.HasPrefix(name, "_acme-challenge.") || (name == "@" && (typ == "NS" || typ == "SOA"))
+}
+
+func normalizeCreateOwner(zone, owner string) string {
+	owner = strings.TrimSpace(owner)
+	absolute := strings.HasSuffix(owner, ".")
+	name := strings.ToLower(strings.TrimSuffix(owner, "."))
+	zone = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(zone), "."))
+	if !absolute {
+		return name
+	}
+	if name == zone {
+		return "@"
+	}
+	if strings.HasSuffix(name, "."+zone) {
+		return strings.TrimSuffix(name, "."+zone)
+	}
+	return name
 }
 
 func changeError(snapshot dnsmodel.Snapshot) error {
