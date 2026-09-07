@@ -1,11 +1,13 @@
 package api
 
 import (
+	"ALLinSSL/backend/internal/dns"
 	"ALLinSSL/backend/public"
 	"crypto/md5"
 	"encoding/hex"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -133,7 +135,16 @@ func Sign(c *gin.Context) {
 	session.Delete("__loginErrEnd")
 	session.Set("login", true)
 	session.Set("__login_key", public.LoginKey)
-	_ = session.Save()
+	identity, err := dns.RotateSession(session)
+	if err != nil {
+		public.FailMsg(c, "DNS 会话初始化失败")
+		return
+	}
+	if err := session.Save(); err != nil {
+		public.FailMsg(c, "登录会话保存失败")
+		return
+	}
+	http.SetCookie(c.Writer, dns.NewSessionCookie(identity))
 	// c.JSON(http.StatusOK, public.ResOK(0, nil, "登录成功"))
 	// 设置cookie
 	c.SetCookie("must_code", "1", -1, "/", "", false, false)
@@ -154,7 +165,12 @@ func GetCode(c *gin.Context) {
 func SignOut(c *gin.Context) {
 	session := sessions.Default(c)
 	session.Delete("login")
-	_ = session.Save()
+	dns.ClearSession(session)
+	if err := session.Save(); err != nil {
+		public.FailMsg(c, "登出会话保存失败")
+		return
+	}
+	http.SetCookie(c.Writer, dns.ExpiredSessionCookie())
 	// c.JSON(http.StatusOK, public.ResOK(0, nil, "登出成功"))
 	public.SuccessMsg(c, "登出成功")
 	return

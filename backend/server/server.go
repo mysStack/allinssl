@@ -22,16 +22,8 @@ func Run() error {
 	public.ReloadConfig()
 	public.InitLogger(public.LogPath)
 	defer public.CloseLogger()
-	r := gin.Default()
-
-	store := memstore.NewStore([]byte("secret")) // 只在内存中，不持久化
-	r.Use(sessions.Sessions(public.SessionKey, store))
-	r.Use(middleware.LoggerMiddleware())
-	r.Use(gzip.Gzip(gzip.DefaultCompression))
 	gob.Register(time.Time{})
-	r.Use(middleware.SessionAuthMiddleware())
-	// r.Use(middleware.OpLoggerMiddleware())
-	route.Register(r)
+	r := newRouter()
 	ctx, cancel := context.WithCancel(context.Background())
 	public.ShutdownFunc = cancel
 	err := RunServer(ctx, r)
@@ -39,6 +31,20 @@ func Run() error {
 		return err
 	}
 	return nil
+}
+
+func newRouter() *gin.Engine {
+	r := gin.Default()
+
+	store := memstore.NewStore([]byte("secret")) // 只在内存中，不持久化
+	r.Use(sessions.Sessions(public.SessionKey, store))
+	r.Use(middleware.LoggerMiddleware())
+	r.Use(gzip.Gzip(gzip.DefaultCompression))
+	r.Use(middleware.DNSRequestPreflight())
+	r.Use(middleware.SessionAuthMiddleware())
+	// r.Use(middleware.OpLoggerMiddleware())
+	route.Register(r)
+	return r
 }
 
 func RunServer(ctx context.Context, r *gin.Engine) error {

@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"ALLinSSL/backend/internal/dns"
+	"ALLinSSL/backend/public"
 	"errors"
 	"mime"
 	"net/http"
@@ -75,7 +76,7 @@ func hasAPIAuthenticationFields(values map[string][]string) bool {
 func sameOrigin(request *http.Request) bool {
 	origin := request.Header.Get("Origin")
 	if origin == "" {
-		return true
+		return false
 	}
 	scheme := "http"
 	if request.TLS != nil {
@@ -86,8 +87,19 @@ func sameOrigin(request *http.Request) bool {
 
 func DNSSessionRequired() gin.HandlerFunc {
 	return func(context *gin.Context) {
-		identity, err := dns.GetSessionIdentity(sessions.Default(context))
+		session := sessions.Default(context)
+		loggedIn, ok := session.Get("login").(bool)
+		if !ok || !loggedIn || session.Get("__login_key") != public.LoginKey {
+			context.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		identity, err := dns.GetSessionIdentity(session)
 		if err != nil {
+			context.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		binding, err := context.Request.Cookie(dns.SessionCookieName)
+		if err != nil || !dns.ValidateSessionBinding(identity, binding.Value) {
 			context.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}

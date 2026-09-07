@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"ALLinSSL/backend/internal/dns"
+	"ALLinSSL/backend/public"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -69,16 +70,67 @@ func TestDNSRequestPreflightAllowsEmptyReadRequestWithoutContentType(t *testing.
 	}
 }
 
+func TestDNSSessionRequiredRejectsMissingOrStaleApplicationLogin(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		login    any
+		loginKey string
+	}{
+		{name: "missing login", loginKey: public.LoginKey},
+		{name: "stale login key", login: true, loginKey: "stale-login-key"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			router := gin.New()
+			router.Use(sessions.Sessions("session", memstore.NewStore([]byte("test-secret"))))
+			router.POST("/setup", func(context *gin.Context) {
+				session := sessions.Default(context)
+				identity, err := dns.RotateSession(session)
+				if test.login != nil {
+					session.Set("login", test.login)
+				}
+				session.Set("__login_key", test.loginKey)
+				if err != nil || session.Save() != nil {
+					context.Status(http.StatusInternalServerError)
+					return
+				}
+				http.SetCookie(context.Writer, dns.NewSessionCookie(identity))
+				context.Status(http.StatusNoContent)
+			})
+			dnsRoutes := router.Group("/v1/dns")
+			dnsRoutes.Use(DNSSessionRequired())
+			dnsRoutes.POST("/get_credentials", func(context *gin.Context) {
+				context.Status(http.StatusNoContent)
+			})
+
+			setupResponse := httptest.NewRecorder()
+			router.ServeHTTP(setupResponse, httptest.NewRequest(http.MethodPost, "/setup", nil))
+			request := httptest.NewRequest(http.MethodPost, "/v1/dns/get_credentials", nil)
+			request.AddCookie(testCookie(t, setupResponse, "session"))
+			request.AddCookie(testCookie(t, setupResponse, dns.SessionCookieName))
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
+			}
+		})
+	}
+}
+
 func TestDNSSessionRequiredRejectsMissingCSRF(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(sessions.Sessions("session", memstore.NewStore([]byte("test-secret"))))
 	router.POST("/setup", func(context *gin.Context) {
-		identity, err := dns.RotateSession(sessions.Default(context))
-		if err != nil || sessions.Default(context).Save() != nil {
+		session := sessions.Default(context)
+		identity, err := dns.RotateSession(session)
+		session.Set("login", true)
+		session.Set("__login_key", public.LoginKey)
+		if err != nil || session.Save() != nil {
 			context.Status(http.StatusInternalServerError)
 			return
 		}
+		http.SetCookie(context.Writer, dns.NewSessionCookie(identity))
 		context.JSON(http.StatusOK, gin.H{"csrf": identity.CSRFToken})
 	})
 	dnsRoutes := router.Group("/v1/dns")
@@ -101,7 +153,9 @@ func TestDNSSessionRequiredRejectsMissingCSRF(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/dns/bind_zone", strings.NewReader("zone=example.com"))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.AddCookie(setupResponse.Result().Cookies()[0])
+	request.Header.Set("Origin", "http://example.com")
+	request.AddCookie(testCookie(t, setupResponse, "session"))
+	request.AddCookie(testCookie(t, setupResponse, dns.SessionCookieName))
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden || called {
@@ -137,11 +191,15 @@ func TestCreateRecordPreviewRequiresSessionAndMatchingCSRF(t *testing.T) {
 	router := gin.New()
 	router.Use(sessions.Sessions("session", memstore.NewStore([]byte("test-secret"))))
 	router.POST("/setup", func(context *gin.Context) {
-		identity, err := dns.RotateSession(sessions.Default(context))
-		if err != nil || sessions.Default(context).Save() != nil {
+		session := sessions.Default(context)
+		identity, err := dns.RotateSession(session)
+		session.Set("login", true)
+		session.Set("__login_key", public.LoginKey)
+		if err != nil || session.Save() != nil {
 			context.Status(http.StatusInternalServerError)
 			return
 		}
+		http.SetCookie(context.Writer, dns.NewSessionCookie(identity))
 		context.JSON(http.StatusOK, gin.H{"csrf": identity.CSRFToken})
 	})
 	dnsRoutes := router.Group("/v1/dns")
@@ -154,6 +212,7 @@ func TestCreateRecordPreviewRequiresSessionAndMatchingCSRF(t *testing.T) {
 
 	missingSession := httptest.NewRequest(http.MethodPost, "/v1/dns/create_record_preview", strings.NewReader("csrf_token=csrf-a"))
 	missingSession.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	missingSession.Header.Set("Origin", "http://example.com")
 	missingSessionResponse := httptest.NewRecorder()
 	router.ServeHTTP(missingSessionResponse, missingSession)
 	if missingSessionResponse.Code != http.StatusUnauthorized || called {
@@ -169,7 +228,8 @@ func TestCreateRecordPreviewRequiresSessionAndMatchingCSRF(t *testing.T) {
 	if err := json.Unmarshal(setupResponse.Body.Bytes(), &setupData); err != nil {
 		t.Fatal(err)
 	}
-	cookie := setupResponse.Result().Cookies()[0]
+	applicationCookie := testCookie(t, setupResponse, "session")
+	dnsCookie := testCookie(t, setupResponse, dns.SessionCookieName)
 
 	for _, test := range []struct {
 		name   string
@@ -177,10 +237,10 @@ func TestCreateRecordPreviewRequiresSessionAndMatchingCSRF(t *testing.T) {
 		origin string
 		want   int
 	}{
-		{name: "missing", want: http.StatusForbidden},
-		{name: "wrong", token: "csrf-wrong", want: http.StatusForbidden},
+		{name: "missing", origin: "http://example.com", want: http.StatusForbidden},
+		{name: "wrong", token: "csrf-wrong", origin: "http://example.com", want: http.StatusForbidden},
 		{name: "cross origin", token: setupData["csrf"], origin: "https://attacker.example", want: http.StatusForbidden},
-		{name: "matching", token: setupData["csrf"], want: http.StatusNoContent},
+		{name: "matching", token: setupData["csrf"], origin: "http://example.com", want: http.StatusNoContent},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			called = false
@@ -189,7 +249,8 @@ func TestCreateRecordPreviewRequiresSessionAndMatchingCSRF(t *testing.T) {
 			}.Encode()))
 			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			request.Header.Set("Origin", test.origin)
-			request.AddCookie(cookie)
+			request.AddCookie(applicationCookie)
+			request.AddCookie(dnsCookie)
 			response := httptest.NewRecorder()
 			router.ServeHTTP(response, request)
 			if response.Code != test.want || called != (test.want == http.StatusNoContent) {
@@ -197,4 +258,15 @@ func TestCreateRecordPreviewRequiresSessionAndMatchingCSRF(t *testing.T) {
 			}
 		})
 	}
+}
+
+func testCookie(t *testing.T, response *httptest.ResponseRecorder, name string) *http.Cookie {
+	t.Helper()
+	for _, cookie := range response.Result().Cookies() {
+		if cookie.Name == name {
+			return cookie
+		}
+	}
+	t.Fatalf("response has no %q cookie: %v", name, response.Header().Values("Set-Cookie"))
+	return nil
 }
