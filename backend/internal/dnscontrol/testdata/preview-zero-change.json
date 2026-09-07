@@ -1,0 +1,13 @@
+[
+  {
+    "domain": "example.com",
+    "corrections": 0,
+    "correction_details": [],
+    "provider": "ALIDNS"
+  },
+  {
+    "domain": "example.com",
+    "corrections": 0,
+    "registrar": "none"
+  }
+]
