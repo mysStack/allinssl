@@ -1,12 +1,14 @@
 package dns
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"strings"
 
 	"ALLinSSL/backend/internal/dnsmodel"
 )
 
-const createRecordMarker = "dnscontrol-create-candidate"
+const createRecordMarkerPrefix = "dnscontrol-create-candidate"
 
 type CreateRecordInput struct {
 	Name     string
@@ -22,15 +24,13 @@ type CreateRecordInput struct {
 
 func BuildCreateRecordCandidate(snapshot dnsmodel.Snapshot, input CreateRecordInput) (dnsmodel.Snapshot, dnsmodel.Record, error) {
 	recordType := strings.ToUpper(strings.TrimSpace(input.Type))
-	if protectedCreateRecord(snapshot.Zone, input.Name, recordType) {
-		return dnsmodel.Snapshot{}, dnsmodel.Record{}, ErrProtectedRecord
-	}
-	if !createRecordTypeAllowed(recordType) {
+	marker, err := createCandidateMarker(snapshot.Records)
+	if err != nil {
 		return dnsmodel.Snapshot{}, dnsmodel.Record{}, ErrInvalidChange
 	}
 
 	record := dnsmodel.Record{
-		ProviderRecordID: createRecordMarker,
+		ProviderRecordID: marker,
 		Name:             input.Name,
 		Type:             recordType,
 		TTL:              input.TTL,
@@ -45,39 +45,31 @@ func BuildCreateRecordCandidate(snapshot dnsmodel.Snapshot, input CreateRecordIn
 	}
 	records := append(append([]dnsmodel.Record(nil), snapshot.Records...), record)
 	candidate, err := dnsmodel.BuildSnapshot(snapshot.Zone, records, snapshot.Limits)
-	if err != nil || !candidate.Compatible {
-		return dnsmodel.Snapshot{}, dnsmodel.Record{}, changeError(candidate)
+	if err != nil {
+		return dnsmodel.Snapshot{}, dnsmodel.Record{}, ErrInvalidChange
 	}
 	if len(candidate.Records) != len(snapshot.Records)+1 {
 		return dnsmodel.Snapshot{}, dnsmodel.Record{}, ErrInvalidChange
 	}
 
-	var normalized dnsmodel.Record
-	found := false
-	for index := range candidate.Records {
-		if candidate.Records[index].ProviderRecordID != createRecordMarker {
-			continue
-		}
-		normalized = candidate.Records[index]
-		normalized.ProviderRecordID = ""
-		candidate.Records[index] = normalized
-		found = true
-		break
-	}
+	normalized, candidateIndex, found := candidateRecordByMarker(candidate, marker)
 	if !found {
 		return dnsmodel.Snapshot{}, dnsmodel.Record{}, ErrInvalidChange
 	}
+	if normalized.Protected {
+		return dnsmodel.Snapshot{}, dnsmodel.Record{}, ErrProtectedRecord
+	}
+	if !createRecordTypeAllowed(recordType) || !candidate.Compatible {
+		return dnsmodel.Snapshot{}, dnsmodel.Record{}, changeError(candidate)
+	}
+	normalized.ProviderRecordID = ""
+	candidate.Records[candidateIndex].ProviderRecordID = ""
 
 	candidate, err = dnsmodel.BuildSnapshot(candidate.Zone, candidate.Records, candidate.Limits)
 	if err != nil || !candidate.Compatible || len(candidate.Records) != len(snapshot.Records)+1 {
 		return dnsmodel.Snapshot{}, dnsmodel.Record{}, changeError(candidate)
 	}
 	return candidate, normalized, nil
-}
-
-func protectedCreateRecord(zone, owner, recordType string) bool {
-	name := normalizeCreateOwner(zone, owner)
-	return name == "_acme-challenge" || strings.HasPrefix(name, "_acme-challenge.") || (name == "@" && (recordType == "NS" || recordType == "SOA"))
 }
 
 func createRecordTypeAllowed(recordType string) bool {
@@ -89,21 +81,31 @@ func createRecordTypeAllowed(recordType string) bool {
 	}
 }
 
-func normalizeCreateOwner(zone, owner string) string {
-	owner = strings.TrimSpace(owner)
-	absolute := strings.HasSuffix(owner, ".")
-	name := strings.ToLower(strings.TrimSuffix(owner, "."))
-	zone = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(zone), "."))
-	if !absolute {
-		return name
+func createCandidateMarker(records []dnsmodel.Record) (string, error) {
+	existing := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		existing[record.ProviderRecordID] = struct{}{}
 	}
-	if name == zone {
-		return "@"
+	for attempts := 0; attempts < 8; attempts++ {
+		bytes := make([]byte, 16)
+		if _, err := rand.Read(bytes); err != nil {
+			return "", err
+		}
+		marker := createRecordMarkerPrefix + ":" + hex.EncodeToString(bytes)
+		if _, found := existing[marker]; !found {
+			return marker, nil
+		}
 	}
-	if strings.HasSuffix(name, "."+zone) {
-		return strings.TrimSuffix(name, "."+zone)
+	return "", ErrInvalidChange
+}
+
+func candidateRecordByMarker(candidate dnsmodel.Snapshot, marker string) (dnsmodel.Record, int, bool) {
+	for index, record := range candidate.Records {
+		if record.ProviderRecordID == marker {
+			return record, index, true
+		}
 	}
-	return name
+	return dnsmodel.Record{}, 0, false
 }
 
 func changeError(snapshot dnsmodel.Snapshot) error {

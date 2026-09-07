@@ -209,3 +209,49 @@ func TestBuildCreateRecordCandidateAcceptsDocumentedBoundaries(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildCreateRecordCandidatePreservesExistingMarkerLikeProviderID(t *testing.T) {
+	existing := createRecordFixture()
+	existing.ProviderRecordID = "dnscontrol-create-candidate"
+	existing.Name = "aaa"
+	snapshot := createRecordSnapshot(t, existing)
+
+	candidate, record, err := BuildCreateRecordCandidate(snapshot, CreateRecordInput{
+		Name: "zzz", Type: "A", TTL: 600, Value: "192.0.2.10",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Name != "zzz" {
+		t.Fatalf("returned record = %#v, want zzz candidate", record)
+	}
+	foundExisting := false
+	for _, candidateRecord := range candidate.Records {
+		if candidateRecord.Name == "aaa" && candidateRecord.ProviderRecordID != "dnscontrol-create-candidate" {
+			t.Fatalf("existing ProviderRecordID changed: %#v", candidateRecord)
+		}
+		if candidateRecord.Name == "aaa" {
+			foundExisting = true
+		}
+	}
+	if !foundExisting {
+		t.Fatalf("candidate lost existing record: %#v", candidate.Records)
+	}
+}
+
+func TestBuildCreateRecordCandidateClassifiesUnicodeAbsoluteProtectedOwners(t *testing.T) {
+	snapshot, err := dnsmodel.BuildSnapshot("例子.中国", nil, dnsmodel.Limits{MinTTL: 600, MaxTTL: 86400, Known: true})
+	if err != nil || !snapshot.Compatible {
+		t.Fatalf("snapshot = %#v, err = %v", snapshot, err)
+	}
+
+	for _, testCase := range []CreateRecordInput{
+		{Name: "例子.中国.", Type: "NS", TTL: 600, Value: "ns1.example.net."},
+		{Name: "_acme-challenge.例子.中国.", Type: "TXT", TTL: 600, Value: "token"},
+	} {
+		_, _, err := BuildCreateRecordCandidate(snapshot, testCase)
+		if !errors.Is(err, ErrProtectedRecord) {
+			t.Fatalf("input = %#v, err = %v, want %v", testCase, err, ErrProtectedRecord)
+		}
+	}
+}
