@@ -5,10 +5,13 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"ALLinSSL/backend/internal/dnscontrol"
 	"ALLinSSL/backend/internal/dnsmodel"
 )
+
+const testWorkerTimeout = 100 * time.Millisecond
 
 type fakeSnapshotReader struct {
 	snapshot dnsmodel.Snapshot
@@ -19,13 +22,24 @@ func (reader fakeSnapshotReader) ReadZone(context.Context, int64, string) (dnsmo
 	return reader.snapshot, reader.err
 }
 
+type timeoutSnapshotReader struct {
+	snapshot dnsmodel.Snapshot
+}
+
+func (reader timeoutSnapshotReader) ReadZone(ctx context.Context, _ int64, _ string) (dnsmodel.Snapshot, error) {
+	<-ctx.Done()
+	return reader.snapshot, nil
+}
+
 type fakePreviewer struct {
-	plan         dnscontrol.PreviewPlan
-	healthErr    error
-	previewErr   error
-	healthCalls  int
-	previewCalls int
-	inputs       []dnscontrol.PreviewInput
+	plan              dnscontrol.PreviewPlan
+	healthErr         error
+	previewErr        error
+	waitForCancel     bool
+	returnAfterCancel bool
+	healthCalls       int
+	previewCalls      int
+	inputs            []dnscontrol.PreviewInput
 }
 
 func (previewer *fakePreviewer) Health(context.Context) (dnscontrol.EngineInfo, error) {
@@ -33,11 +47,18 @@ func (previewer *fakePreviewer) Health(context.Context) (dnscontrol.EngineInfo, 
 	return dnscontrol.EngineInfo{Version: dnscontrol.ExpectedVersion}, previewer.healthErr
 }
 
-func (previewer *fakePreviewer) Preview(_ context.Context, input dnscontrol.PreviewInput) (dnscontrol.PreviewPlan, error) {
+func (previewer *fakePreviewer) Preview(ctx context.Context, input dnscontrol.PreviewInput) (dnscontrol.PreviewPlan, error) {
 	previewer.previewCalls++
 	previewer.inputs = append(previewer.inputs, input)
 	if len(input.Artifacts.Config) == 0 || len(input.Artifacts.Credentials) == 0 {
 		return dnscontrol.PreviewPlan{}, ErrInvalidAdopt
+	}
+	if previewer.waitForCancel {
+		<-ctx.Done()
+		return dnscontrol.PreviewPlan{}, ctx.Err()
+	}
+	if previewer.returnAfterCancel {
+		<-ctx.Done()
 	}
 	return previewer.plan, previewer.previewErr
 }
@@ -207,6 +228,257 @@ func TestCreateRecordPreviewPersistsSafeSummaryAndUsesFullFreshSnapshot(t *testi
 	config := string(previewer.inputs[0].Artifacts.Config)
 	if !strings.Contains(config, `A("www", "192.0.2.10")`) || !strings.Contains(config, `A("api", "192.0.2.20")`) {
 		t.Fatalf("preview did not use full candidate snapshot: %s", config)
+	}
+}
+
+func TestCreateRecordPreviewPersistsOnlyValidatedCanonicalCandidateSummary(t *testing.T) {
+	snapshot := testSnapshot(t)
+	previewer := &fakePreviewer{plan: dnscontrol.PreviewPlan{
+		Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"create"},
+	}}
+	service := newAdoptService(t, fakeSnapshotReader{snapshot: snapshot}, previewer)
+	markZoneAdopted(t, service, 1, snapshot.SnapshotHash)
+	input := createRecordPreviewInput(snapshot, "record-canonical")
+	input.Record.Name = "Api.Example.com."
+
+	job, err := service.StartCreateRecordPreview(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != JobPreviewed {
+		t.Fatalf("job = %#v", job)
+	}
+	if job.CandidateRecord != (CandidateRecordSummary{Name: "api", Type: "A", TTL: 600}) {
+		t.Fatalf("candidate summary = %#v", job.CandidateRecord)
+	}
+
+	var persisted string
+	if err := service.store.database.QueryRow(`
+		SELECT candidate_record_summary FROM dns_change_jobs WHERE id = ?`, job.ID,
+	).Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(persisted, "Api.Example.com.") {
+		t.Fatalf("candidate summary retained raw input: %q", persisted)
+	}
+}
+
+func TestCreateRecordPreviewDoesNotPersistSummaryForInvalidFullCandidate(t *testing.T) {
+	existing := dnsmodel.Record{Name: "api", Type: "A", TTL: 600, Value: "192.0.2.20", Line: "default", Status: "ENABLE"}
+	snapshot, err := dnsmodel.BuildSnapshot("example.com", []dnsmodel.Record{existing}, dnsmodel.Limits{MinTTL: 600, MaxTTL: 86400, Known: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := newAdoptService(t, fakeSnapshotReader{snapshot: snapshot}, &fakePreviewer{})
+	markZoneAdopted(t, service, 1, snapshot.SnapshotHash)
+
+	job, err := service.StartCreateRecordPreview(context.Background(), createRecordPreviewInput(snapshot, "record-conflict"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != JobBlocked || job.ErrorCode != "DNS_RECORD_CONFLICT" {
+		t.Fatalf("job = %#v", job)
+	}
+
+	var persisted string
+	if err := service.store.database.QueryRow(`
+		SELECT candidate_record_summary FROM dns_change_jobs WHERE id = ?`, job.ID,
+	).Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted != "" || job.CandidateRecord != (CandidateRecordSummary{}) {
+		t.Fatalf("invalid candidate summary persisted: column=%q job=%#v", persisted, job.CandidateRecord)
+	}
+	var auditRows int
+	if err := service.store.database.QueryRow(`
+		SELECT COUNT(*) FROM dns_audit_logs
+		WHERE job_id = ? AND zone = 'example.com' AND record_type = 'A' AND record_name = 'api' AND error_code = 'DNS_RECORD_CONFLICT'`, job.ID,
+	).Scan(&auditRows); err != nil {
+		t.Fatal(err)
+	}
+	if auditRows != 1 {
+		t.Fatalf("blocked candidate audit rows = %d, want 1", auditRows)
+	}
+}
+
+func TestCreateRecordPreviewTimeoutPersistsFailureAndReleasesZoneLock(t *testing.T) {
+	snapshot := testSnapshot(t)
+	service := newAdoptService(t, fakeSnapshotReader{snapshot: snapshot}, &fakePreviewer{waitForCancel: true})
+	service.workerTimeout = testWorkerTimeout
+	markZoneAdopted(t, service, 1, snapshot.SnapshotHash)
+
+	job, err := service.StartCreateRecordPreview(context.Background(), createRecordPreviewInput(snapshot, "record-timeout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != JobFailed || job.ErrorCode != "DNS_WORKER_TIMEOUT" {
+		t.Fatalf("timed out job = %#v", job)
+	}
+	if _, err := service.store.CreateAdopt(context.Background(), AdoptRequest{
+		Zone: "example.com", CredentialID: 1, ActorID: "local-admin", SessionBinding: "session-b",
+		AuthEpoch: "epoch-b", RequestHash: "after-timeout", IdempotencyKey: "after-timeout", SnapshotHash: snapshot.SnapshotHash,
+	}); err != nil {
+		t.Fatalf("timeout left Zone lock held: %v", err)
+	}
+}
+
+func TestCreateRecordPreviewRejectsPlanReturnedAfterWorkerCancellation(t *testing.T) {
+	snapshot := testSnapshot(t)
+	previewer := &fakePreviewer{
+		returnAfterCancel: true,
+		plan:              dnscontrol.PreviewPlan{Zone: "example.com", Provider: "ALIDNS", Corrections: 1, Details: []string{"create"}},
+	}
+	service := newAdoptService(t, fakeSnapshotReader{snapshot: snapshot}, previewer)
+	service.workerTimeout = testWorkerTimeout
+	markZoneAdopted(t, service, 1, snapshot.SnapshotHash)
+
+	job, err := service.StartCreateRecordPreview(context.Background(), createRecordPreviewInput(snapshot, "record-cancel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != JobFailed || job.ErrorCode != "DNS_WORKER_TIMEOUT" {
+		t.Fatalf("canceled job = %#v", job)
+	}
+	if _, err := service.store.CreateAdopt(context.Background(), AdoptRequest{
+		Zone: "example.com", CredentialID: 1, ActorID: "local-admin", SessionBinding: "session-b",
+		AuthEpoch: "epoch-b", RequestHash: "after-cancel", IdempotencyKey: "after-cancel", SnapshotHash: snapshot.SnapshotHash,
+	}); err != nil {
+		t.Fatalf("canceled worker left Zone lock held: %v", err)
+	}
+}
+
+func TestCreateRecordPreviewTimeoutBeforeCandidatePersistenceReleasesZoneLock(t *testing.T) {
+	snapshot := testSnapshot(t)
+	service := newAdoptService(t, timeoutSnapshotReader{snapshot: snapshot}, &fakePreviewer{})
+	service.workerTimeout = testWorkerTimeout
+	markZoneAdopted(t, service, 1, snapshot.SnapshotHash)
+
+	job, err := service.StartCreateRecordPreview(context.Background(), createRecordPreviewInput(snapshot, "record-read-timeout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != JobFailed || job.ErrorCode != "DNS_WORKER_TIMEOUT" {
+		t.Fatalf("timed out job = %#v", job)
+	}
+	if _, err := service.store.CreateAdopt(context.Background(), AdoptRequest{
+		Zone: "example.com", CredentialID: 1, ActorID: "local-admin", SessionBinding: "session-b",
+		AuthEpoch: "epoch-b", RequestHash: "after-read-timeout", IdempotencyKey: "after-read-timeout", SnapshotHash: snapshot.SnapshotHash,
+	}); err != nil {
+		t.Fatalf("pre-persistence timeout left Zone lock held: %v", err)
+	}
+}
+
+func TestCreateRecordPreviewSurfacesUnpersistedWorkerFailure(t *testing.T) {
+	snapshot := testSnapshot(t)
+	service := newAdoptService(t, fakeSnapshotReader{snapshot: snapshot}, &fakePreviewer{})
+	markZoneAdopted(t, service, 1, snapshot.SnapshotHash)
+	var workerErr error
+	service.reportWorkerError = func(err error) { workerErr = err }
+	service.startWorker = func(work func()) {
+		if err := service.store.database.Close(); err != nil {
+			t.Fatal(err)
+		}
+		work()
+	}
+
+	job, err := service.StartCreateRecordPreview(context.Background(), createRecordPreviewInput(snapshot, "record-persist-failure"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != JobQueued {
+		t.Fatalf("job state = %q, want queued because terminal persistence failed", job.State)
+	}
+	if !errors.Is(workerErr, ErrStoreUnavailable) {
+		t.Fatalf("reported worker error = %v, want %v", workerErr, ErrStoreUnavailable)
+	}
+}
+
+func TestCreateRecordPreviewTerminalPersistenceValidationFailureFailsSafely(t *testing.T) {
+	snapshot := testSnapshot(t)
+	service := newAdoptService(t, fakeSnapshotReader{snapshot: snapshot}, &fakePreviewer{})
+	job, err := service.store.CreateChangePreview(context.Background(), ChangePreviewRequest{
+		Zone: "example.com", CredentialID: 1, ActorID: "local-admin",
+		SessionBinding: "session-a", AuthEpoch: "epoch-a", RequestHash: "change-request",
+		IdempotencyKey: "change-key", SnapshotHash: snapshot.SnapshotHash,
+		AuditRecord: CandidateRecordSummary{Name: "api", Type: "A", TTL: 600},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.store.StartPreview(context.Background(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.finishChange(job.ID, JobPreviewed,
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		ChangeSummary{Corrections: 1, Details: []string{"unsafe raw detail"}}, "",
+	); err != nil {
+		t.Fatal(err)
+	}
+	job, err = service.store.GetJobForSession(context.Background(), job.ID, "local-admin", "session-a", "epoch-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != JobFailed || job.ErrorCode != "DNS_TERMINAL_PERSIST_FAILED" {
+		t.Fatalf("fallback job = %#v", job)
+	}
+	if _, err := service.store.CreateAdopt(context.Background(), AdoptRequest{
+		Zone: "example.com", CredentialID: 1, ActorID: "local-admin", SessionBinding: "session-b",
+		AuthEpoch: "epoch-b", RequestHash: "after-fallback", IdempotencyKey: "after-fallback", SnapshotHash: snapshot.SnapshotHash,
+	}); err != nil {
+		t.Fatalf("terminal persistence fallback left Zone lock held: %v", err)
+	}
+}
+
+func TestCreateRecordPreviewAuditPersistsSafeContext(t *testing.T) {
+	snapshot := testSnapshot(t)
+	previewer := &fakePreviewer{plan: dnscontrol.PreviewPlan{
+		Zone: "example.com", Provider: "BIND", Corrections: 1, Details: []string{"unsafe provider detail"},
+	}}
+	service := newAdoptService(t, fakeSnapshotReader{snapshot: snapshot}, previewer)
+	markZoneAdopted(t, service, 1, snapshot.SnapshotHash)
+	input := createRecordPreviewInput(snapshot, "record-audit")
+	input.Record.Name = "Audit.Example.com."
+	input.Record.Type = "TXT"
+	input.Record.Value = "sensitive-audit-value"
+
+	job, err := service.StartCreateRecordPreview(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != JobBlocked || job.ErrorCode != "DNS_PREVIEW_PLAN_INVALID" || job.PlanHash == "" {
+		t.Fatalf("job = %#v", job)
+	}
+
+	var zone, recordType, recordName, planHash, errorCode string
+	if err := service.store.database.QueryRow(`
+		SELECT zone, record_type, record_name, plan_hash, error_code
+		FROM dns_audit_logs WHERE job_id = ? AND action = 'finished'`, job.ID,
+	).Scan(&zone, &recordType, &recordName, &planHash, &errorCode); err != nil {
+		t.Fatal(err)
+	}
+	if zone != "example.com" || recordType != "TXT" || recordName != "audit" || planHash != job.PlanHash || errorCode != job.ErrorCode {
+		t.Fatalf("audit context = zone:%q type:%q name:%q plan:%q error:%q", zone, recordType, recordName, planHash, errorCode)
+	}
+	var contextualRows int
+	if err := service.store.database.QueryRow(`
+		SELECT COUNT(*) FROM dns_audit_logs
+		WHERE job_id = ? AND zone = 'example.com' AND record_type = 'TXT' AND record_name = 'audit'`, job.ID,
+	).Scan(&contextualRows); err != nil {
+		t.Fatal(err)
+	}
+	if contextualRows != 3 {
+		t.Fatalf("audit rows with safe Zone/record context = %d, want 3", contextualRows)
+	}
+	var leaked int
+	if err := service.store.database.QueryRow(`
+		SELECT COUNT(*) FROM dns_audit_logs
+		WHERE job_id = ? AND (zone LIKE '%sensitive-audit-value%' OR record_type LIKE '%sensitive-audit-value%' OR record_name LIKE '%sensitive-audit-value%' OR plan_hash LIKE '%sensitive-audit-value%' OR error_code LIKE '%sensitive-audit-value%')`, job.ID,
+	).Scan(&leaked); err != nil {
+		t.Fatal(err)
+	}
+	if leaked != 0 {
+		t.Fatalf("audit retained record value in %d rows", leaked)
 	}
 }
 

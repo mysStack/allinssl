@@ -68,6 +68,11 @@ func (store *Store) EnsureSchema(ctx context.Context) error {
 			job_id TEXT NOT NULL,
 			action TEXT NOT NULL,
 			state TEXT NOT NULL,
+			zone TEXT NOT NULL DEFAULT '',
+			record_type TEXT NOT NULL DEFAULT '',
+			record_name TEXT NOT NULL DEFAULT '',
+			plan_hash TEXT NOT NULL DEFAULT '',
+			error_code TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS dns_idempotency_keys (
@@ -88,8 +93,48 @@ func (store *Store) EnsureSchema(ctx context.Context) error {
 	if err := ensureChangeJobColumns(ctx, transaction); err != nil {
 		return storeError(ctx, err)
 	}
+	if err := ensureAuditLogColumns(ctx, transaction); err != nil {
+		return storeError(ctx, err)
+	}
 	if err := transaction.Commit(); err != nil {
 		return storeError(ctx, err)
+	}
+	return nil
+}
+
+func ensureAuditLogColumns(ctx context.Context, transaction *sql.Tx) error {
+	return ensureTextColumns(ctx, transaction, "dns_audit_logs", []string{"zone", "record_type", "record_name", "plan_hash", "error_code"})
+}
+
+func ensureTextColumns(ctx context.Context, transaction *sql.Tx, table string, additions []string) error {
+	rows, err := transaction.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return err
+	}
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var position, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&position, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		columns[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, addition := range additions {
+		if columns[addition] {
+			continue
+		}
+		if _, err := transaction.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+addition+` TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -165,6 +210,9 @@ func (store *Store) CreateAdopt(ctx context.Context, request AdoptRequest) (Adop
 		if getErr != nil {
 			return AdoptJob{}, getErr
 		}
+		if !sameIdempotencySession(job, request.SessionBinding, request.AuthEpoch) {
+			return AdoptJob{}, ErrIdempotencyConflict
+		}
 		if err := transaction.Commit(); err != nil {
 			return AdoptJob{}, storeError(ctx, err)
 		}
@@ -191,6 +239,7 @@ func (store *Store) CreateAdopt(ctx context.Context, request AdoptRequest) (Adop
 		CreatedAt:          now,
 		UpdatedAt:          now,
 		sessionBindingHash: hashSessionBinding(request.SessionBinding),
+		created:            true,
 	}
 	timestamp := formatStoreTime(now)
 	_, err = transaction.ExecContext(ctx, `
@@ -219,8 +268,7 @@ func (store *Store) CreateAdopt(ctx context.Context, request AdoptRequest) (Adop
 	if err != nil {
 		return AdoptJob{}, storeError(ctx, err)
 	}
-	_, err = transaction.ExecContext(ctx, `INSERT INTO dns_audit_logs (job_id, action, state, created_at) VALUES (?, 'created', ?, ?)`, job.ID, job.State, timestamp)
-	if err != nil {
+	if err := insertAuditLog(ctx, transaction, job, "created", job.State, "", "", timestamp); err != nil {
 		return AdoptJob{}, storeError(ctx, err)
 	}
 	if err := transaction.Commit(); err != nil {
@@ -237,11 +285,6 @@ func (store *Store) CreateChangePreview(ctx context.Context, request ChangePrevi
 	if !valid {
 		return AdoptJob{}, ErrInvalidChange
 	}
-	candidateRecord, err := json.Marshal(request.CandidateRecord)
-	if err != nil {
-		return AdoptJob{}, ErrInvalidChange
-	}
-
 	transaction, err := store.database.BeginTx(ctx, nil)
 	if err != nil {
 		return AdoptJob{}, storeError(ctx, err)
@@ -261,6 +304,9 @@ func (store *Store) CreateChangePreview(ctx context.Context, request ChangePrevi
 		job, getErr := store.getJob(ctx, transaction, existingJobID)
 		if getErr != nil {
 			return AdoptJob{}, getErr
+		}
+		if !sameIdempotencySession(job, request.SessionBinding, request.AuthEpoch) {
+			return AdoptJob{}, ErrIdempotencyConflict
 		}
 		if err := transaction.Commit(); err != nil {
 			return AdoptJob{}, storeError(ctx, err)
@@ -285,19 +331,20 @@ func (store *Store) CreateChangePreview(ctx context.Context, request ChangePrevi
 		State:              JobQueued,
 		Version:            1,
 		SnapshotHash:       request.SnapshotHash,
-		CandidateRecord:    request.CandidateRecord,
 		CreatedAt:          now,
 		UpdatedAt:          now,
 		sessionBindingHash: hashSessionBinding(request.SessionBinding),
+		created:            true,
+		auditRecord:        request.AuditRecord,
 	}
 	timestamp := formatStoreTime(now)
 	_, err = transaction.ExecContext(ctx, `
 		INSERT INTO dns_change_jobs (
 			id, kind, zone, credential_id, actor_id, session_binding_hash, auth_epoch, state, version,
-			snapshot_hash, candidate_record_summary, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			snapshot_hash, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.ID, job.Kind, job.Zone, job.CredentialID, job.ActorID, job.sessionBindingHash, job.AuthEpoch, job.State,
-		job.Version, job.SnapshotHash, string(candidateRecord), timestamp, timestamp,
+		job.Version, job.SnapshotHash, timestamp, timestamp,
 	)
 	if err != nil {
 		return AdoptJob{}, storeError(ctx, err)
@@ -317,9 +364,46 @@ func (store *Store) CreateChangePreview(ctx context.Context, request ChangePrevi
 	if err != nil {
 		return AdoptJob{}, storeError(ctx, err)
 	}
-	_, err = transaction.ExecContext(ctx, `INSERT INTO dns_audit_logs (job_id, action, state, created_at) VALUES (?, 'created', ?, ?)`, job.ID, job.State, timestamp)
+	if err := insertAuditLog(ctx, transaction, job, "created", job.State, "", "", timestamp); err != nil {
+		return AdoptJob{}, storeError(ctx, err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return AdoptJob{}, storeError(ctx, err)
+	}
+	return job, nil
+}
+
+func (store *Store) SetChangePreviewCandidate(ctx context.Context, jobID string, summary CandidateRecordSummary) (AdoptJob, error) {
+	if store == nil || store.database == nil || ctx == nil || jobID == "" || !validCandidateRecordSummary(summary) {
+		return AdoptJob{}, ErrInvalidChange
+	}
+	encodedSummary, err := json.Marshal(summary)
+	if err != nil {
+		return AdoptJob{}, ErrInvalidChange
+	}
+	transaction, err := store.database.BeginTx(ctx, nil)
 	if err != nil {
 		return AdoptJob{}, storeError(ctx, err)
+	}
+	defer transaction.Rollback()
+
+	job, err := store.getJob(ctx, transaction, jobID)
+	if err != nil {
+		return AdoptJob{}, err
+	}
+	if job.Kind != JobKindCreateRecordPreview || job.State != JobPreviewing || job.CandidateRecord != (CandidateRecordSummary{}) {
+		return AdoptJob{}, ErrInvalidJobTransition
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		UPDATE dns_change_jobs SET candidate_record_summary = ?, version = version + 1, updated_at = ?
+		WHERE id = ? AND kind = ? AND state = ? AND candidate_record_summary = ''`,
+		string(encodedSummary), formatStoreTime(time.Now().UTC()), job.ID, JobKindCreateRecordPreview, JobPreviewing,
+	); err != nil {
+		return AdoptJob{}, storeError(ctx, err)
+	}
+	job, err = store.getJob(ctx, transaction, job.ID)
+	if err != nil {
+		return AdoptJob{}, err
 	}
 	if err := transaction.Commit(); err != nil {
 		return AdoptJob{}, storeError(ctx, err)
@@ -353,8 +437,7 @@ func (store *Store) StartPreview(ctx context.Context, jobID string) (AdoptJob, e
 	if err != nil {
 		return AdoptJob{}, storeError(ctx, err)
 	}
-	_, err = transaction.ExecContext(ctx, `INSERT INTO dns_audit_logs (job_id, action, state, created_at) VALUES (?, 'previewing', ?, ?)`, job.ID, JobPreviewing, formatStoreTime(now))
-	if err != nil {
+	if err := insertAuditLog(ctx, transaction, job, "previewing", JobPreviewing, "", "", formatStoreTime(now)); err != nil {
 		return AdoptJob{}, storeError(ctx, err)
 	}
 	job, err = store.getJob(ctx, transaction, job.ID)
@@ -378,10 +461,21 @@ func (store *Store) FinishChangePreview(ctx context.Context, jobID string, state
 	if state != JobPreviewed && state != JobBlocked && state != JobFailed {
 		return AdoptJob{}, ErrInvalidChange
 	}
+	if planHash != "" && !validSHA256Hex(planHash) {
+		return AdoptJob{}, ErrInvalidChange
+	}
 	if state == JobPreviewed && (planHash == "" || !validStoredChangeSummary(summary)) {
 		return AdoptJob{}, ErrInvalidChange
 	}
 	return store.finishJob(ctx, jobID, JobKindCreateRecordPreview, state, planHash, summary, errorCode)
+}
+
+func validSHA256Hex(value string) bool {
+	if len(value) != sha256.Size*2 || strings.ToLower(value) != value {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func validStoredChangeSummary(summary ChangeSummary) bool {
@@ -450,8 +544,10 @@ func (store *Store) finishJob(ctx context.Context, jobID string, kind JobKind, s
 	if err != nil {
 		return AdoptJob{}, storeError(ctx, err)
 	}
-	_, err = transaction.ExecContext(ctx, `INSERT INTO dns_audit_logs (job_id, action, state, created_at) VALUES (?, 'finished', ?, ?)`, job.ID, state, timestamp)
-	if err != nil {
+	job.State = state
+	job.PlanHash = planHash
+	job.ErrorCode = errorCode
+	if err := insertAuditLog(ctx, transaction, job, "finished", state, planHash, errorCode, timestamp); err != nil {
 		return AdoptJob{}, storeError(ctx, err)
 	}
 	job, err = store.getJob(ctx, transaction, job.ID)
@@ -462,6 +558,93 @@ func (store *Store) finishJob(ctx context.Context, jobID string, kind JobKind, s
 		return AdoptJob{}, storeError(ctx, err)
 	}
 	return job, nil
+}
+
+func (store *Store) FailActiveJob(ctx context.Context, jobID, errorCode string) (AdoptJob, error) {
+	if store == nil || store.database == nil || ctx == nil || jobID == "" || !safeAuditCode(errorCode) {
+		return AdoptJob{}, ErrStoreUnavailable
+	}
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return AdoptJob{}, storeError(ctx, err)
+	}
+	defer transaction.Rollback()
+	job, err := store.getJob(ctx, transaction, jobID)
+	if err != nil {
+		return AdoptJob{}, err
+	}
+	if job.State != JobQueued && job.State != JobPreviewing {
+		return AdoptJob{}, ErrInvalidJobTransition
+	}
+	timestamp := formatStoreTime(time.Now().UTC())
+	if _, err := transaction.ExecContext(ctx, `
+		UPDATE dns_change_jobs SET state = ?, version = version + 1, error_code = ?, updated_at = ?
+		WHERE id = ? AND state IN (?, ?)`, JobFailed, errorCode, timestamp, job.ID, JobQueued, JobPreviewing,
+	); err != nil {
+		return AdoptJob{}, storeError(ctx, err)
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM dns_zone_locks WHERE zone = ? AND job_id = ?`, job.Zone, job.ID); err != nil {
+		return AdoptJob{}, storeError(ctx, err)
+	}
+	job.State = JobFailed
+	job.ErrorCode = errorCode
+	if err := insertAuditLog(ctx, transaction, job, "worker_failed", JobFailed, "", errorCode, timestamp); err != nil {
+		return AdoptJob{}, storeError(ctx, err)
+	}
+	job, err = store.getJob(ctx, transaction, job.ID)
+	if err != nil {
+		return AdoptJob{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return AdoptJob{}, storeError(ctx, err)
+	}
+	return job, nil
+}
+
+func insertAuditLog(ctx context.Context, transaction *sql.Tx, job AdoptJob, action string, state JobState, planHash, errorCode, timestamp string) error {
+	recordType, recordName := "", ""
+	if job.Kind == JobKindCreateRecordPreview && validCandidateRecordSummary(job.CandidateRecord) {
+		recordType, recordName = job.CandidateRecord.Type, job.CandidateRecord.Name
+	} else if job.Kind == JobKindCreateRecordPreview && validCandidateRecordSummary(job.auditRecord) {
+		recordType, recordName = job.auditRecord.Type, job.auditRecord.Name
+	} else if job.Kind == JobKindCreateRecordPreview {
+		err := transaction.QueryRowContext(ctx, `
+			SELECT record_type, record_name FROM dns_audit_logs
+			WHERE job_id = ? AND record_type <> '' AND record_name <> '' ORDER BY id LIMIT 1`, job.ID,
+		).Scan(&recordType, &recordName)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	if !safeAuditCode(action) || !safeAuditCode(string(state)) || !safeAuditText(job.Zone, 253) ||
+		(planHash != "" && !safeAuditText(planHash, 128)) || (errorCode != "" && !safeAuditCode(errorCode)) {
+		return ErrStoreUnavailable
+	}
+	_, err := transaction.ExecContext(ctx, `
+		INSERT INTO dns_audit_logs (
+			job_id, action, state, zone, record_type, record_name, plan_hash, error_code, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.ID, action, state, job.Zone, recordType, recordName, planHash, errorCode, timestamp,
+	)
+	return err
+}
+
+func safeAuditCode(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func safeAuditText(value string, maximumBytes int) bool {
+	return safeSummaryText(value, maximumBytes)
 }
 
 func (store *Store) IsAdopted(ctx context.Context, zone string, credentialID int64) (bool, error) {
@@ -507,15 +690,19 @@ func (store *Store) FailInterrupted(ctx context.Context) error {
 	}
 	defer transaction.Rollback()
 
-	rows, err := transaction.QueryContext(ctx, `SELECT id, zone FROM dns_change_jobs WHERE state IN (?, ?)`, JobQueued, JobPreviewing)
+	rows, err := transaction.QueryContext(ctx, `SELECT id, zone, kind FROM dns_change_jobs WHERE state IN (?, ?)`, JobQueued, JobPreviewing)
 	if err != nil {
 		return storeError(ctx, err)
 	}
-	type interruptedJob struct{ id, zone string }
+	type interruptedJob struct {
+		id   string
+		zone string
+		kind JobKind
+	}
 	jobs := make([]interruptedJob, 0)
 	for rows.Next() {
 		var job interruptedJob
-		if err := rows.Scan(&job.id, &job.zone); err != nil {
+		if err := rows.Scan(&job.id, &job.zone, &job.kind); err != nil {
 			_ = rows.Close()
 			return storeError(ctx, err)
 		}
@@ -542,8 +729,8 @@ func (store *Store) FailInterrupted(ctx context.Context) error {
 		if err != nil {
 			return storeError(ctx, err)
 		}
-		_, err = transaction.ExecContext(ctx, `INSERT INTO dns_audit_logs (job_id, action, state, created_at) VALUES (?, 'interrupted', ?, ?)`, job.id, JobFailed, timestamp)
-		if err != nil {
+		interrupted := AdoptJob{ID: job.id, Kind: job.kind, Zone: job.zone, State: JobFailed}
+		if err := insertAuditLog(ctx, transaction, interrupted, "interrupted", JobFailed, "", "DNS_INTERRUPTED", timestamp); err != nil {
 			return storeError(ctx, err)
 		}
 	}
@@ -568,23 +755,48 @@ func normalizeAdoptRequest(request AdoptRequest) (AdoptRequest, bool) {
 
 func normalizeChangePreviewRequest(request ChangePreviewRequest) (ChangePreviewRequest, bool) {
 	request.Zone = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(request.Zone)), ".")
-	request.CandidateRecord.Name = strings.TrimSpace(request.CandidateRecord.Name)
-	request.CandidateRecord.Type = strings.ToUpper(strings.TrimSpace(request.CandidateRecord.Type))
 	for _, value := range []string{
 		request.Zone, request.ActorID, request.SessionBinding, request.AuthEpoch, request.RequestHash,
-		request.IdempotencyKey, request.SnapshotHash, request.CandidateRecord.Name, request.CandidateRecord.Type,
+		request.IdempotencyKey, request.SnapshotHash,
 	} {
 		if value == "" || len(value) > 512 || strings.TrimSpace(value) != value {
 			return ChangePreviewRequest{}, false
 		}
 	}
-	if request.CredentialID <= 0 || request.CandidateRecord.TTL <= 0 || !strings.Contains(request.Zone, ".") {
-		return ChangePreviewRequest{}, false
-	}
-	if !safeSummaryText(request.CandidateRecord.Name, 253) || !safeSummaryText(request.CandidateRecord.Type, 16) {
+	if request.CredentialID <= 0 || !strings.Contains(request.Zone, ".") || !validCandidateRecordSummary(request.AuditRecord) {
 		return ChangePreviewRequest{}, false
 	}
 	return request, true
+}
+
+func validCandidateRecordSummary(summary CandidateRecordSummary) bool {
+	return summary.Name != "" && summary.Name == strings.ToLower(summary.Name) && !strings.HasSuffix(summary.Name, ".") &&
+		createRecordTypeAllowed(summary.Type) && summary.Type == strings.ToUpper(summary.Type) &&
+		summary.TTL >= 600 && summary.TTL <= 86400 && validCandidateSummaryName(summary.Name)
+}
+
+func validCandidateSummaryName(name string) bool {
+	if name == "@" {
+		return true
+	}
+	if !safeSummaryText(name, 253) {
+		return false
+	}
+	for index, label := range strings.Split(name, ".") {
+		if label == "*" && index == 0 {
+			continue
+		}
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-' || character == '_' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func (store *Store) getJob(ctx context.Context, querier interface {
@@ -642,6 +854,11 @@ func newJobID() (string, error) {
 func hashSessionBinding(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(digest[:])
+}
+
+func sameIdempotencySession(job AdoptJob, sessionBinding, authEpoch string) bool {
+	return subtle.ConstantTimeCompare([]byte(job.AuthEpoch), []byte(authEpoch)) == 1 &&
+		subtle.ConstantTimeCompare([]byte(job.sessionBindingHash), []byte(hashSessionBinding(sessionBinding))) == 1
 }
 
 func formatStoreTime(value time.Time) string {

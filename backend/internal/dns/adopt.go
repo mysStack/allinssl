@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"log"
 	"strings"
 	"time"
 	"unicode"
@@ -14,7 +16,10 @@ import (
 	"ALLinSSL/backend/internal/dnsmodel"
 )
 
-const adoptWorkerTimeout = 90 * time.Second
+const (
+	adoptWorkerTimeout       = 90 * time.Second
+	workerPersistenceTimeout = 5 * time.Second
+)
 
 type Previewer interface {
 	Health(context.Context) (dnscontrol.EngineInfo, error)
@@ -44,19 +49,27 @@ type CreateRecordPreviewInput struct {
 }
 
 type AdoptService struct {
-	reader      zoneSnapshotReader
-	credentials credentialStore
-	store       *Store
-	previewer   Previewer
-	startWorker func(func())
+	reader             zoneSnapshotReader
+	credentials        credentialStore
+	store              *Store
+	previewer          Previewer
+	workerTimeout      time.Duration
+	persistenceTimeout time.Duration
+	reportWorkerError  func(error)
+	startWorker        func(func())
 }
 
 func NewAdoptService(reader zoneSnapshotReader, credentials credentialStore, store *Store, previewer Previewer) *AdoptService {
 	return &AdoptService{
-		reader:      reader,
-		credentials: credentials,
-		store:       store,
-		previewer:   previewer,
+		reader:             reader,
+		credentials:        credentials,
+		store:              store,
+		previewer:          previewer,
+		workerTimeout:      adoptWorkerTimeout,
+		persistenceTimeout: workerPersistenceTimeout,
+		reportWorkerError: func(err error) {
+			log.Printf("DNS Preview worker 持久化失败: %v", err)
+		},
 		startWorker: func(work func()) { go work() },
 	}
 }
@@ -86,7 +99,13 @@ func (service *AdoptService) Start(ctx context.Context, input AdoptStartInput) (
 	if err != nil {
 		return AdoptJob{}, err
 	}
-	service.startWorker(func() { service.run(job) })
+	if job.created {
+		service.startWorker(func() {
+			if runErr := service.run(job); runErr != nil {
+				service.reportWorkerError(runErr)
+			}
+		})
+	}
 	return job, nil
 }
 
@@ -104,6 +123,10 @@ func (service *AdoptService) StartCreateRecordPreview(ctx context.Context, input
 	if err != nil {
 		return AdoptJob{}, ErrInvalidChange
 	}
+	auditRecord, err := safeCreateRecordAuditSummary(zone, input.Record)
+	if err != nil {
+		return AdoptJob{}, err
+	}
 	job, err := service.store.CreateChangePreview(ctx, ChangePreviewRequest{
 		Zone:           zone,
 		CredentialID:   input.CredentialID,
@@ -113,14 +136,18 @@ func (service *AdoptService) StartCreateRecordPreview(ctx context.Context, input
 		RequestHash:    requestHash,
 		IdempotencyKey: input.IdempotencyKey,
 		SnapshotHash:   input.BaseSnapshotHash,
-		CandidateRecord: CandidateRecordSummary{
-			Name: strings.TrimSpace(input.Record.Name), Type: strings.ToUpper(strings.TrimSpace(input.Record.Type)), TTL: input.Record.TTL,
-		},
+		AuditRecord:    auditRecord,
 	})
 	if err != nil {
 		return AdoptJob{}, err
 	}
-	service.startWorker(func() { service.runCreateRecordPreview(job, input.Record) })
+	if job.created {
+		service.startWorker(func() {
+			if runErr := service.runCreateRecordPreview(job, input.Record); runErr != nil {
+				service.reportWorkerError(runErr)
+			}
+		})
+	}
 	if current, getErr := service.store.GetJobForSession(
 		ctx, job.ID, input.Identity.ActorID, input.Identity.SessionID, input.Identity.AuthEpoch,
 	); getErr == nil {
@@ -150,130 +177,165 @@ func (service *AdoptService) RecoverInterrupted(ctx context.Context) error {
 	return service.store.FailInterrupted(ctx)
 }
 
-func (service *AdoptService) run(job AdoptJob) {
-	ctx, cancel := context.WithTimeout(context.Background(), adoptWorkerTimeout)
+func (service *AdoptService) run(job AdoptJob) error {
+	ctx, cancel := context.WithTimeout(context.Background(), service.workerTimeout)
 	defer cancel()
 	if _, err := service.store.StartPreview(ctx, job.ID); err != nil {
-		return
+		return service.failActiveJob(job.ID, workerErrorCode(ctx, "DNS_PREVIEW_START_FAILED"), err)
 	}
 
 	snapshot, err := service.reader.ReadZone(ctx, job.CredentialID, job.Zone)
 	if err != nil {
-		service.finish(ctx, job.ID, JobFailed, "", "DNS_SNAPSHOT_READ_FAILED")
-		return
+		return service.finish(job.ID, JobFailed, "", workerErrorCode(ctx, "DNS_SNAPSHOT_READ_FAILED"))
 	}
 	if snapshot.Zone != job.Zone || snapshot.SnapshotHash != job.SnapshotHash {
-		service.finish(ctx, job.ID, JobBlocked, "", "DNS_SNAPSHOT_DRIFT")
-		return
+		return service.finish(job.ID, JobBlocked, "", "DNS_SNAPSHOT_DRIFT")
 	}
 	if !snapshot.Compatible {
-		service.finish(ctx, job.ID, JobBlocked, "", "DNS_INCOMPATIBLE_SNAPSHOT")
-		return
+		return service.finish(job.ID, JobBlocked, "", "DNS_INCOMPATIBLE_SNAPSHOT")
 	}
 
 	credential, err := service.credentials.Resolve(ctx, job.CredentialID)
 	if err != nil {
-		service.finish(ctx, job.ID, JobFailed, "", "DNS_CREDENTIAL_UNAVAILABLE")
-		return
+		return service.finish(job.ID, JobFailed, "", workerErrorCode(ctx, "DNS_CREDENTIAL_UNAVAILABLE"))
 	}
 	artifacts, err := dnscontrol.GenerateArtifacts(snapshot, dnscontrol.AliDNSCredentials{
 		AccessKeyID: credential.accessKeyID, AccessKeySecret: credential.accessKeySecret,
 	})
 	if err != nil {
-		service.finish(ctx, job.ID, JobBlocked, "", "DNS_ARTIFACT_INVALID")
-		return
+		return service.finish(job.ID, JobBlocked, "", "DNS_ARTIFACT_INVALID")
 	}
 	engineInfo, err := service.previewer.Health(ctx)
 	if err != nil || engineInfo.Version != dnscontrol.ExpectedVersion {
-		service.finish(ctx, job.ID, JobFailed, "", "DNS_ENGINE_UNAVAILABLE")
-		return
+		return service.finish(job.ID, JobFailed, "", workerErrorCode(ctx, "DNS_ENGINE_UNAVAILABLE"))
 	}
 	plan, err := service.previewer.Preview(ctx, dnscontrol.PreviewInput{Zone: job.Zone, Artifacts: artifacts})
 	if err != nil {
-		service.finish(ctx, job.ID, JobFailed, "", "DNS_PREVIEW_FAILED")
-		return
+		return service.finish(job.ID, JobFailed, "", workerErrorCode(ctx, "DNS_PREVIEW_FAILED"))
+	}
+	if ctx.Err() != nil {
+		return service.finish(job.ID, JobFailed, "", "DNS_WORKER_TIMEOUT")
 	}
 	planHash := previewPlanHash(plan)
 	if plan.Zone != job.Zone || plan.Provider != "ALIDNS" || plan.Corrections != 0 {
-		service.finish(ctx, job.ID, JobBlocked, planHash, "DNS_NONZERO_CORRECTIONS")
-		return
+		return service.finish(job.ID, JobBlocked, planHash, "DNS_NONZERO_CORRECTIONS")
 	}
-	service.finish(ctx, job.ID, JobAdopted, planHash, "")
+	return service.finish(job.ID, JobAdopted, planHash, "")
 }
 
-func (service *AdoptService) runCreateRecordPreview(job AdoptJob, input CreateRecordInput) {
-	ctx, cancel := context.WithTimeout(context.Background(), adoptWorkerTimeout)
+func (service *AdoptService) runCreateRecordPreview(job AdoptJob, input CreateRecordInput) error {
+	ctx, cancel := context.WithTimeout(context.Background(), service.workerTimeout)
 	defer cancel()
 	if _, err := service.store.StartPreview(ctx, job.ID); err != nil {
-		return
+		return service.failActiveJob(job.ID, workerErrorCode(ctx, "DNS_PREVIEW_START_FAILED"), err)
 	}
 
 	adopted, err := service.store.IsAdopted(ctx, job.Zone, job.CredentialID)
 	if err != nil {
-		service.finishChange(ctx, job.ID, JobFailed, "", ChangeSummary{}, "DNS_ADOPTION_CHECK_FAILED")
-		return
+		return service.finishChange(job.ID, JobFailed, "", ChangeSummary{}, workerErrorCode(ctx, "DNS_ADOPTION_CHECK_FAILED"))
 	}
 	if !adopted {
-		service.finishChange(ctx, job.ID, JobBlocked, "", ChangeSummary{}, "DNS_NOT_ADOPTED")
-		return
+		return service.finishChange(job.ID, JobBlocked, "", ChangeSummary{}, "DNS_NOT_ADOPTED")
 	}
 
 	snapshot, err := service.reader.ReadZone(ctx, job.CredentialID, job.Zone)
 	if err != nil {
-		service.finishChange(ctx, job.ID, JobFailed, "", ChangeSummary{}, "DNS_SNAPSHOT_READ_FAILED")
-		return
+		return service.finishChange(job.ID, JobFailed, "", ChangeSummary{}, workerErrorCode(ctx, "DNS_SNAPSHOT_READ_FAILED"))
 	}
 	if snapshot.Zone != job.Zone || snapshot.SnapshotHash != job.SnapshotHash {
-		service.finishChange(ctx, job.ID, JobBlocked, "", ChangeSummary{}, "DNS_REMOTE_DRIFT")
-		return
+		return service.finishChange(job.ID, JobBlocked, "", ChangeSummary{}, "DNS_REMOTE_DRIFT")
 	}
 	if !snapshot.Compatible {
-		service.finishChange(ctx, job.ID, JobBlocked, "", ChangeSummary{}, "DNS_INCOMPATIBLE_SNAPSHOT")
-		return
+		return service.finishChange(job.ID, JobBlocked, "", ChangeSummary{}, "DNS_INCOMPATIBLE_SNAPSHOT")
 	}
 
-	candidate, _, err := BuildCreateRecordCandidate(snapshot, input)
+	candidate, record, err := BuildCreateRecordCandidate(snapshot, input)
 	if err != nil {
-		service.finishChange(ctx, job.ID, JobBlocked, "", ChangeSummary{}, changePreviewErrorCode(err))
-		return
+		return service.finishChange(job.ID, JobBlocked, "", ChangeSummary{}, changePreviewErrorCode(err))
 	}
+	updatedJob, err := service.store.SetChangePreviewCandidate(ctx, job.ID, CandidateRecordSummary{
+		Name: record.Name, Type: record.Type, TTL: record.TTL,
+	})
+	if err != nil {
+		return service.failActiveJob(job.ID, workerErrorCode(ctx, "DNS_CANDIDATE_PERSIST_FAILED"), err)
+	}
+	job = updatedJob
 	credential, err := service.credentials.Resolve(ctx, job.CredentialID)
 	if err != nil {
-		service.finishChange(ctx, job.ID, JobFailed, "", ChangeSummary{}, "DNS_CREDENTIAL_UNAVAILABLE")
-		return
+		return service.finishChange(job.ID, JobFailed, "", ChangeSummary{}, workerErrorCode(ctx, "DNS_CREDENTIAL_UNAVAILABLE"))
 	}
 	artifacts, err := dnscontrol.GenerateArtifacts(candidate, dnscontrol.AliDNSCredentials{
 		AccessKeyID: credential.accessKeyID, AccessKeySecret: credential.accessKeySecret,
 	})
 	if err != nil {
-		service.finishChange(ctx, job.ID, JobBlocked, "", ChangeSummary{}, "DNS_ARTIFACT_INVALID")
-		return
+		return service.finishChange(job.ID, JobBlocked, "", ChangeSummary{}, "DNS_ARTIFACT_INVALID")
 	}
 	engineInfo, err := service.previewer.Health(ctx)
 	if err != nil || engineInfo.Version != dnscontrol.ExpectedVersion {
-		service.finishChange(ctx, job.ID, JobFailed, "", ChangeSummary{}, "DNS_ENGINE_UNAVAILABLE")
-		return
+		return service.finishChange(job.ID, JobFailed, "", ChangeSummary{}, workerErrorCode(ctx, "DNS_ENGINE_UNAVAILABLE"))
 	}
 	plan, err := service.previewer.Preview(ctx, dnscontrol.PreviewInput{Zone: job.Zone, Artifacts: artifacts})
 	if err != nil {
-		service.finishChange(ctx, job.ID, JobFailed, "", ChangeSummary{}, "DNS_PREVIEW_FAILED")
-		return
+		return service.finishChange(job.ID, JobFailed, "", ChangeSummary{}, workerErrorCode(ctx, "DNS_PREVIEW_FAILED"))
+	}
+	if ctx.Err() != nil {
+		return service.finishChange(job.ID, JobFailed, "", ChangeSummary{}, "DNS_WORKER_TIMEOUT")
 	}
 	planHash := previewPlanHash(plan)
 	summary, valid := summarizeCreateRecordPlan(plan, job.Zone)
 	if !valid {
-		service.finishChange(ctx, job.ID, JobBlocked, planHash, ChangeSummary{}, "DNS_PREVIEW_PLAN_INVALID")
-		return
+		return service.finishChange(job.ID, JobBlocked, planHash, ChangeSummary{}, "DNS_PREVIEW_PLAN_INVALID")
 	}
-	service.finishChange(ctx, job.ID, JobPreviewed, planHash, summary, "")
+	return service.finishChange(job.ID, JobPreviewed, planHash, summary, "")
 }
 
-func (service *AdoptService) finish(ctx context.Context, jobID string, state JobState, planHash, errorCode string) {
-	_, _ = service.store.FinishAdopt(ctx, jobID, state, planHash, errorCode)
+func (service *AdoptService) finish(jobID string, state JobState, planHash, errorCode string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), service.persistenceTimeout)
+	defer cancel()
+	_, err := service.store.FinishAdopt(ctx, jobID, state, planHash, errorCode)
+	if err == nil {
+		return nil
+	}
+	return service.failActiveJob(jobID, "DNS_TERMINAL_PERSIST_FAILED", err)
 }
 
-func (service *AdoptService) finishChange(ctx context.Context, jobID string, state JobState, planHash string, summary ChangeSummary, errorCode string) {
-	_, _ = service.store.FinishChangePreview(ctx, jobID, state, planHash, summary, errorCode)
+func (service *AdoptService) finishChange(jobID string, state JobState, planHash string, summary ChangeSummary, errorCode string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), service.persistenceTimeout)
+	defer cancel()
+	_, err := service.store.FinishChangePreview(ctx, jobID, state, planHash, summary, errorCode)
+	if err == nil {
+		return nil
+	}
+	return service.failActiveJob(jobID, "DNS_TERMINAL_PERSIST_FAILED", err)
+}
+
+func (service *AdoptService) failActiveJob(jobID, errorCode string, cause error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), service.persistenceTimeout)
+	defer cancel()
+	_, err := service.store.FailActiveJob(ctx, jobID, errorCode)
+	if err == nil {
+		return nil
+	}
+	return errors.Join(cause, err)
+}
+
+func workerErrorCode(ctx context.Context, fallback string) string {
+	if ctx.Err() != nil {
+		return "DNS_WORKER_TIMEOUT"
+	}
+	return fallback
+}
+
+func safeCreateRecordAuditSummary(zone string, input CreateRecordInput) (CandidateRecordSummary, error) {
+	snapshot, err := dnsmodel.BuildSnapshot(zone, nil, dnsmodel.Limits{MinTTL: 600, MaxTTL: 86400, Known: true})
+	if err != nil {
+		return CandidateRecordSummary{}, ErrInvalidChange
+	}
+	_, record, err := BuildCreateRecordCandidate(snapshot, input)
+	if err != nil {
+		return CandidateRecordSummary{}, err
+	}
+	return CandidateRecordSummary{Name: record.Name, Type: record.Type, TTL: record.TTL}, nil
 }
 
 func adoptRequestHash(input AdoptStartInput) (string, error) {

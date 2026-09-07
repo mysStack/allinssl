@@ -55,7 +55,16 @@ func TestStoreEnsureSchemaMigratesChangePreviewColumnsWithoutReplacingJobs(t *te
 		) VALUES (
 			'legacy-job', 'example.com', 7, 'local-admin', 'binding-hash', 'epoch-a', 'adopted', 3,
 			'snapshot-a', '2026-09-07T00:00:00Z', '2026-09-07T00:00:01Z'
-		)`)
+		);
+		CREATE TABLE dns_audit_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			job_id TEXT NOT NULL,
+			action TEXT NOT NULL,
+			state TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);
+		INSERT INTO dns_audit_logs (job_id, action, state, created_at)
+		VALUES ('legacy-job', 'finished', 'adopted', '2026-09-07T00:00:01Z')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,6 +94,17 @@ func TestStoreEnsureSchemaMigratesChangePreviewColumnsWithoutReplacingJobs(t *te
 	}
 	if count != 1 {
 		t.Fatalf("job count = %d, want 1", count)
+	}
+
+	var auditJobID, auditAction, auditState, auditZone, auditRecordType, auditRecordName, auditPlanHash, auditErrorCode string
+	if err := database.QueryRow(`
+		SELECT job_id, action, state, zone, record_type, record_name, plan_hash, error_code
+		FROM dns_audit_logs WHERE id = 1`,
+	).Scan(&auditJobID, &auditAction, &auditState, &auditZone, &auditRecordType, &auditRecordName, &auditPlanHash, &auditErrorCode); err != nil {
+		t.Fatal(err)
+	}
+	if auditJobID != "legacy-job" || auditAction != "finished" || auditState != "adopted" || auditZone != "" || auditRecordType != "" || auditRecordName != "" || auditPlanHash != "" || auditErrorCode != "" {
+		t.Fatalf("legacy audit changed: job=%q action=%q state=%q zone=%q type=%q name=%q plan=%q error=%q", auditJobID, auditAction, auditState, auditZone, auditRecordType, auditRecordName, auditPlanHash, auditErrorCode)
 	}
 }
 
@@ -215,6 +235,35 @@ func TestStoreReplaysMatchingIdempotencyKeyAndRejectsChangedRequest(t *testing.T
 	}
 }
 
+func TestStoreCreateAdoptRejectsIdempotencyReplayOutsideOriginalSession(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		sessionBinding string
+		authEpoch      string
+	}{
+		{name: "different session binding", sessionBinding: "session-b", authEpoch: "epoch-a"},
+		{name: "different auth epoch", sessionBinding: "session-a", authEpoch: "epoch-b"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newTestStore(t)
+			request := AdoptRequest{
+				Zone: "example.com", CredentialID: 1, ActorID: "local-admin",
+				SessionBinding: "session-a", AuthEpoch: "epoch-a", RequestHash: "adopt-request",
+				IdempotencyKey: "adopt-key", SnapshotHash: "snapshot-a",
+			}
+			if _, err := store.CreateAdopt(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+
+			request.SessionBinding = test.sessionBinding
+			request.AuthEpoch = test.authEpoch
+			if _, err := store.CreateAdopt(context.Background(), request); !errors.Is(err, ErrIdempotencyConflict) {
+				t.Fatalf("replay error = %v, want %v", err, ErrIdempotencyConflict)
+			}
+		})
+	}
+}
+
 func TestStoreCreateChangePreviewUsesSeparateIdempotencyActionAndSharedZoneLock(t *testing.T) {
 	store := newTestStore(t)
 	adoptJob, err := store.CreateAdopt(context.Background(), AdoptRequest{
@@ -230,7 +279,7 @@ func TestStoreCreateChangePreviewUsesSeparateIdempotencyActionAndSharedZoneLock(
 		Zone: "example.com", CredentialID: 1, ActorID: "local-admin",
 		SessionBinding: "session-a", AuthEpoch: "epoch-a", RequestHash: "change-request",
 		IdempotencyKey: "shared-key", SnapshotHash: "snapshot-a",
-		CandidateRecord: CandidateRecordSummary{Name: "api", Type: "A", TTL: 600},
+		AuditRecord: CandidateRecordSummary{Name: "api", Type: "A", TTL: 600},
 	}
 	if _, err := store.CreateChangePreview(context.Background(), request); !errors.Is(err, ErrZoneBusy) {
 		t.Fatalf("change preview error = %v, want %v", err, ErrZoneBusy)
@@ -251,8 +300,8 @@ func TestStoreCreateChangePreviewUsesSeparateIdempotencyActionAndSharedZoneLock(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.ID != first.ID || second.Kind != JobKindCreateRecordPreview || second.CandidateRecord != request.CandidateRecord {
-		t.Fatalf("replayed job = %#v, want ID %q and candidate %#v", second, first.ID, request.CandidateRecord)
+	if second.ID != first.ID || second.Kind != JobKindCreateRecordPreview || second.CandidateRecord != (CandidateRecordSummary{}) {
+		t.Fatalf("replayed job = %#v, want ID %q without an unvalidated candidate summary", second, first.ID)
 	}
 
 	request.RequestHash = "changed-request"
@@ -261,16 +310,67 @@ func TestStoreCreateChangePreviewUsesSeparateIdempotencyActionAndSharedZoneLock(
 	}
 }
 
-func TestStoreCreateChangePreviewRejectsUnsafeCandidateSummary(t *testing.T) {
+func TestStoreCreateChangePreviewRejectsIdempotencyReplayOutsideOriginalSession(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		sessionBinding string
+		authEpoch      string
+	}{
+		{name: "different session binding", sessionBinding: "session-b", authEpoch: "epoch-a"},
+		{name: "different auth epoch", sessionBinding: "session-a", authEpoch: "epoch-b"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newTestStore(t)
+			request := ChangePreviewRequest{
+				Zone: "example.com", CredentialID: 1, ActorID: "local-admin",
+				SessionBinding: "session-a", AuthEpoch: "epoch-a", RequestHash: "change-request",
+				IdempotencyKey: "change-key", SnapshotHash: "snapshot-a",
+				AuditRecord: CandidateRecordSummary{Name: "api", Type: "A", TTL: 600},
+			}
+			if _, err := store.CreateChangePreview(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+
+			request.SessionBinding = test.sessionBinding
+			request.AuthEpoch = test.authEpoch
+			if _, err := store.CreateChangePreview(context.Background(), request); !errors.Is(err, ErrIdempotencyConflict) {
+				t.Fatalf("replay error = %v, want %v", err, ErrIdempotencyConflict)
+			}
+		})
+	}
+}
+
+func TestStoreSetChangePreviewCandidateRejectsUnsafeSummary(t *testing.T) {
 	store := newTestStore(t)
-	_, err := store.CreateChangePreview(context.Background(), ChangePreviewRequest{
+	job, err := store.CreateChangePreview(context.Background(), ChangePreviewRequest{
 		Zone: "example.com", CredentialID: 1, ActorID: "local-admin",
 		SessionBinding: "session-a", AuthEpoch: "epoch-a", RequestHash: "change-request",
 		IdempotencyKey: "change-key", SnapshotHash: "snapshot-a",
-		CandidateRecord: CandidateRecordSummary{Name: "api\nsecret", Type: "A", TTL: 600},
+		AuditRecord: CandidateRecordSummary{Name: "api", Type: "A", TTL: 600},
 	})
-	if !errors.Is(err, ErrInvalidChange) {
-		t.Fatalf("error = %v, want %v", err, ErrInvalidChange)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.StartPreview(context.Background(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, summary := range []CandidateRecordSummary{
+		{Name: "api\nsecret", Type: "A", TTL: 600},
+		{Name: "Api", Type: "A", TTL: 600},
+		{Name: "api", Type: "TXT;DROP", TTL: 600},
+		{Name: "api/../../secret", Type: "A", TTL: 600},
+		{Name: "api", Type: "A", TTL: 599},
+	} {
+		if _, err := store.SetChangePreviewCandidate(context.Background(), job.ID, summary); !errors.Is(err, ErrInvalidChange) {
+			t.Fatalf("summary %#v error = %v, want %v", summary, err, ErrInvalidChange)
+		}
+	}
+	var persisted string
+	if err := store.database.QueryRow(`SELECT candidate_record_summary FROM dns_change_jobs WHERE id = ?`, job.ID).Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted != "" {
+		t.Fatalf("unsafe candidate persisted: %q", persisted)
 	}
 }
 
@@ -280,7 +380,7 @@ func TestStoreChangePreviewTerminalStatePersistsSummaryAndReleasesZoneLock(t *te
 		Zone: "example.com", CredentialID: 1, ActorID: "local-admin",
 		SessionBinding: "session-a", AuthEpoch: "epoch-a", RequestHash: "change-request",
 		IdempotencyKey: "change-key", SnapshotHash: "snapshot-a",
-		CandidateRecord: CandidateRecordSummary{Name: "api", Type: "A", TTL: 600},
+		AuditRecord: CandidateRecordSummary{Name: "api", Type: "A", TTL: 600},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -288,12 +388,15 @@ func TestStoreChangePreviewTerminalStatePersistsSummaryAndReleasesZoneLock(t *te
 	if _, err := store.StartPreview(context.Background(), job.ID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.SetChangePreviewCandidate(context.Background(), job.ID, CandidateRecordSummary{Name: "api", Type: "A", TTL: 600}); err != nil {
+		t.Fatal(err)
+	}
 	summary := ChangeSummary{Corrections: 1, Details: []string{"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}
-	job, err = store.FinishChangePreview(context.Background(), job.ID, JobPreviewed, "plan-a", summary, "")
+	job, err = store.FinishChangePreview(context.Background(), job.ID, JobPreviewed, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", summary, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if job.State != JobPreviewed || job.PlanHash != "plan-a" || job.ChangeSummary.Corrections != 1 || len(job.ChangeSummary.Details) != 1 {
+	if job.State != JobPreviewed || job.PlanHash != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" || job.ChangeSummary.Corrections != 1 || len(job.ChangeSummary.Details) != 1 {
 		t.Fatalf("finished job = %#v", job)
 	}
 
@@ -321,8 +424,16 @@ func TestStoreChangePreviewRejectsUnsafeSuccessfulSummary(t *testing.T) {
 		},
 		{
 			name:     "raw provider detail",
-			planHash: "plan-a",
+			planHash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 			summary:  ChangeSummary{Corrections: 1, Details: []string{"CREATE api.example.com A 192.0.2.20"}},
+		},
+		{
+			name:     "malformed plan hash",
+			planHash: "plan-a\nunsafe",
+			summary: ChangeSummary{
+				Corrections: 1,
+				Details:     []string{"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+			},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -331,7 +442,7 @@ func TestStoreChangePreviewRejectsUnsafeSuccessfulSummary(t *testing.T) {
 				Zone: "example.com", CredentialID: 1, ActorID: "local-admin",
 				SessionBinding: "session-a", AuthEpoch: "epoch-a", RequestHash: "change-request",
 				IdempotencyKey: "change-key", SnapshotHash: "snapshot-a",
-				CandidateRecord: CandidateRecordSummary{Name: "api", Type: "A", TTL: 600},
+				AuditRecord: CandidateRecordSummary{Name: "api", Type: "A", TTL: 600},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -354,7 +465,7 @@ func TestStoreChangePreviewEveryTerminalStateReleasesZoneLockAndWritesAudit(t *t
 				Zone: "example.com", CredentialID: 1, ActorID: "local-admin",
 				SessionBinding: "session-a", AuthEpoch: "epoch-a", RequestHash: "change-request",
 				IdempotencyKey: "change-key", SnapshotHash: "snapshot-a",
-				CandidateRecord: CandidateRecordSummary{Name: "api", Type: "A", TTL: 600},
+				AuditRecord: CandidateRecordSummary{Name: "api", Type: "A", TTL: 600},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -366,7 +477,10 @@ func TestStoreChangePreviewEveryTerminalStateReleasesZoneLockAndWritesAudit(t *t
 			planHash := ""
 			errorCode := "DNS_TEST_TERMINAL"
 			if state == JobPreviewed {
-				planHash = "plan-a"
+				if _, err := store.SetChangePreviewCandidate(context.Background(), job.ID, CandidateRecordSummary{Name: "api", Type: "A", TTL: 600}); err != nil {
+					t.Fatal(err)
+				}
+				planHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 				errorCode = ""
 				summary = ChangeSummary{
 					Corrections: 1,
@@ -400,6 +514,40 @@ func TestStoreChangePreviewEveryTerminalStateReleasesZoneLockAndWritesAudit(t *t
 				t.Fatalf("audit count = %d, want 3", auditCount)
 			}
 		})
+	}
+}
+
+func TestStoreFailInterruptedPreservesChangePreviewAuditContextAndReleasesLock(t *testing.T) {
+	store := newTestStore(t)
+	job, err := store.CreateChangePreview(context.Background(), ChangePreviewRequest{
+		Zone: "example.com", CredentialID: 1, ActorID: "local-admin",
+		SessionBinding: "session-a", AuthEpoch: "epoch-a", RequestHash: "change-request",
+		IdempotencyKey: "change-key", SnapshotHash: "snapshot-a",
+		AuditRecord: CandidateRecordSummary{Name: "api", Type: "TXT", TTL: 600},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FailInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var zone, recordType, recordName, errorCode string
+	if err := store.database.QueryRow(`
+		SELECT zone, record_type, record_name, error_code
+		FROM dns_audit_logs WHERE job_id = ? AND action = 'interrupted'`, job.ID,
+	).Scan(&zone, &recordType, &recordName, &errorCode); err != nil {
+		t.Fatal(err)
+	}
+	if zone != "example.com" || recordType != "TXT" || recordName != "api" || errorCode != "DNS_INTERRUPTED" {
+		t.Fatalf("interrupted audit = zone:%q type:%q name:%q error:%q", zone, recordType, recordName, errorCode)
+	}
+	if _, err := store.CreateAdopt(context.Background(), AdoptRequest{
+		Zone: "example.com", CredentialID: 1, ActorID: "local-admin",
+		SessionBinding: "session-b", AuthEpoch: "epoch-b", RequestHash: "adopt-request",
+		IdempotencyKey: "adopt-key", SnapshotHash: "snapshot-b",
+	}); err != nil {
+		t.Fatalf("interrupted change preview left Zone lock held: %v", err)
 	}
 }
 

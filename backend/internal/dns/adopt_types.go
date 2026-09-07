@@ -61,15 +61,15 @@ type ChangeSummary struct {
 }
 
 type ChangePreviewRequest struct {
-	Zone            string
-	CredentialID    int64
-	ActorID         string
-	SessionBinding  string
-	AuthEpoch       string
-	RequestHash     string
-	IdempotencyKey  string
-	SnapshotHash    string
-	CandidateRecord CandidateRecordSummary
+	Zone           string
+	CredentialID   int64
+	ActorID        string
+	SessionBinding string
+	AuthEpoch      string
+	RequestHash    string
+	IdempotencyKey string
+	SnapshotHash   string
+	AuditRecord    CandidateRecordSummary
 }
 
 type AdoptJob struct {
@@ -90,4 +90,6 @@ type AdoptJob struct {
 	UpdatedAt       time.Time              `json:"updated_at"`
 
 	sessionBindingHash string
+	created            bool
+	auditRecord        CandidateRecordSummary
 }
