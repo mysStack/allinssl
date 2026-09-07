@@ -4,6 +4,7 @@ import (
 	"ALLinSSL/backend/app/api"
 	"ALLinSSL/backend/app/api/monitor"
 	"ALLinSSL/backend/app/api/private_ca"
+	"ALLinSSL/backend/middleware"
 	"ALLinSSL/backend/public"
 	"ALLinSSL/static"
 	"github.com/gin-gonic/gin"
@@ -95,11 +96,16 @@ func Register(r *gin.Engine) {
 		report.POST("/notify_test", api.NotifyTest)
 	}
 	dns := v1.Group("/dns")
+	dns.Use(middleware.DNSSessionRequired())
 	{
-		handler := api.NewDNSHandler(api.DefaultDNSService())
+		handler := api.DefaultDNSHandler()
 		dns.POST("/get_credentials", handler.GetCredentials)
 		dns.POST("/get_zones", handler.GetZones)
 		dns.POST("/get_snapshot", handler.GetSnapshot)
+		dns.POST("/get_health", handler.GetHealth)
+		dns.POST("/bind_zone", handler.BindZone)
+		dns.POST("/create_record_preview", handler.CreateRecordPreview)
+		dns.POST("/get_job", handler.GetJob)
 	}
 	setting := v1.Group("/setting")
 	{
