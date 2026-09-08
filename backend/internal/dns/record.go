@@ -17,7 +17,8 @@ var (
 )
 
 func normalizeRecordInput(snapshot dnsmodel.Snapshot, input RecordInput, status string) (dnsmodel.Record, error) {
-	if input.Line == "" {
+	line := strings.TrimSpace(input.Line)
+	if line == "" {
 		return dnsmodel.Record{}, ErrInvalidRecord
 	}
 	record := dnsmodel.Record{
@@ -30,7 +31,7 @@ func normalizeRecordInput(snapshot dnsmodel.Snapshot, input RecordInput, status 
 		return dnsmodel.Record{}, ErrInvalidRecord
 	}
 	normalized := probe.Records[0]
-	normalized.Line, normalized.Status = input.Line, status
+	normalized.Line, normalized.Status = line, status
 	return normalized, nil
 }
 

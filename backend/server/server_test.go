@@ -20,7 +20,7 @@ import (
 
 func TestRegisteredServerRejectsUnsafeDNSMutationsBeforeAuthentication(t *testing.T) {
 	router := newTestRegisteredRouter(t)
-	for _, path := range []string{"/v1/dns/bind_zone", "/v1/dns/create_record_preview"} {
+	for _, path := range []string{"/v1/dns/create_record", "/v1/dns/update_record", "/v1/dns/delete_record", "/v1/dns/set_record_status"} {
 		t.Run(path+"/cross_origin", func(t *testing.T) {
 			request := newDNSRequest(path, "csrf_token=token")
 			request.Header.Set("Origin", "https://attacker.example")
@@ -93,7 +93,7 @@ func TestRegisteredLoginRotatesDNSBindingAndRealRoutesRequireSessionAndCSRF(t *t
 	staleRequest.AddCookie(firstDNSCookie)
 	assertServerStatus(t, router, staleRequest, http.StatusUnauthorized)
 
-	for _, path := range []string{"/v1/dns/bind_zone", "/v1/dns/create_record_preview"} {
+	for _, path := range []string{"/v1/dns/create_record", "/v1/dns/update_record", "/v1/dns/delete_record", "/v1/dns/set_record_status"} {
 		t.Run(path+"/missing_csrf", func(t *testing.T) {
 			request := newDNSRequest(path, "zone=example.com")
 			request.AddCookie(applicationCookie)
@@ -127,12 +127,12 @@ func TestRegisteredLoginRotatesDNSBindingAndRealRoutesRequireSessionAndCSRF(t *t
 
 func registeredServerCSRF(t *testing.T, router http.Handler, applicationCookie, dnsCookie *http.Cookie) string {
 	t.Helper()
-	request := newDNSRequest("/v1/dns/get_health", "")
+	request := newDNSRequest("/v1/dns/get_session", "")
 	request.AddCookie(applicationCookie)
 	request.AddCookie(dnsCookie)
 	response := serveRequest(router, request)
 	if response.Code != http.StatusOK {
-		t.Fatalf("get_health status/body = %d/%s", response.Code, response.Body.String())
+		t.Fatalf("get_session status/body = %d/%s", response.Code, response.Body.String())
 	}
 	var body struct {
 		Data struct {
@@ -140,7 +140,7 @@ func registeredServerCSRF(t *testing.T, router http.Handler, applicationCookie, 
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body.Data.CSRFToken == "" {
-		t.Fatalf("get_health response = %s, error = %v", response.Body.String(), err)
+		t.Fatalf("get_session response = %s, error = %v", response.Body.String(), err)
 	}
 	return body.Data.CSRFToken
 }

@@ -150,6 +150,16 @@ func TestServiceDoesNotRetryUncertainWrite(t *testing.T) {
 	}
 }
 
+func TestServiceRejectsWhitespaceOnlyLine(t *testing.T) {
+	snapshot := testRecordSnapshot(t)
+	manager := &fakeZoneManager{snapshots: []dnsmodel.Snapshot{snapshot, snapshot}}
+	service := NewService(fakeCredentialStore{credential: Credential{accessKeyID: "id", accessKeySecret: "secret"}}, &fakeReaderFactory{reader: manager})
+
+	if _, err := service.CreateRecord(context.Background(), 1, "example.com", RecordInput{Name: "api", Type: "A", TTL: 600, Value: "192.0.2.20", Line: "  "}); !errors.Is(err, ErrInvalidRecord) {
+		t.Fatalf("whitespace line err = %v", err)
+	}
+}
+
 func testRecordSnapshot(t *testing.T, records ...dnsmodel.Record) dnsmodel.Snapshot {
 	t.Helper()
 	snapshot, err := dnsmodel.BuildSnapshot("example.com", records, dnsmodel.Limits{MinTTL: 600, MaxTTL: 86400, Known: true})

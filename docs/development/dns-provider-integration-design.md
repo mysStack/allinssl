@@ -1,6 +1,6 @@
 # DNS 解析直连厂商集成设计
 
-日期：2026-09-08。状态：已确认，待实施。
+日期：2026-09-08。状态：已实施，待专用测试 Zone 人工验收。
 
 ## 目标
 
@@ -29,7 +29,7 @@ DNSControl 可在未来作为独立、显式启用的 GitOps 功能评估；同�
 
 ## 现有能力与迁移
 
-当前 `backend/internal/dns` 已能使用 AliDNS 完整分页读取授权、Zone 和快照；`backend/app/api/dns.go` 与 `frontend/apps/allin-ssl/src/views/dns/` 已具备受保护的 DNS 会话、CSRF、筛选和排序。
+当前 `backend/internal/dns` 已能使用 AliDNS 完整分页读取授权、Zone 和快照，并通过同一客户端封装完成单记录增改删和启停；`backend/app/api/dns.go` 与 `frontend/apps/allin-ssl/src/views/dns/` 已具备受保护的 DNS 会话、CSRF、筛选、排序和记录表单。
 
 实施的第一步删除普通页面中的 DNSControl 健康检查、纳管 Preview、创建 Preview、任务轮询及相关路由，不保留双入口。页面保留授权选择、Zone 选择、完整读取、筛选和排序，并改为直接执行记录操作。
 
@@ -71,7 +71,7 @@ DNSControl 可在未来作为独立、显式启用的 GitOps 功能评估；同�
 
 - 顶部“添加记录”打开记录表单。
 - 表格每行提供“编辑”“删除”“启用/停用”。删除必须通过二次确认。
-- 表单按记录类型动态显示 MX、SRV、CAA 的专属字段，并提供当前 Zone 已出现的线路选择与默认线路。
+- 表单按记录类型动态显示 MX、SRV、CAA 的专属字段，并允许输入 AliDNS 解析线路，默认值为 `default`。
 - `NS`、`SOA`、`_acme-challenge` 行显示只读原因且不显示写操作；没有绕过入口。
 - 操作成功后使用接口返回的完整快照替换页面数据；操作失败保留当前快照并显示错误。
 
@@ -86,6 +86,15 @@ DNSControl 可在未来作为独立、显式启用的 GitOps 功能评估；同�
 - 前端测试：新增、编辑、删除确认、启停、动态字段、只读按钮、成功刷新和失败提示。
 - 验证命令：相关 Go 测试、`go vet`、Vitest、Vite 构建和 `git diff --check`。
 - 不使用真实生产 DNS 进行自动测试；完成后仅用专用测试 Zone 与最小权限 AK/SK 人工验证一次。
+
+## 本阶段验证记录
+
+- `go test ./backend/app/api ./backend/internal/dns ./backend/internal/dnsmodel ./backend/middleware ./backend/route ./backend/server -count=1`：通过。
+- `go vet ./backend/app/api ./backend/internal/dns ./backend/internal/dnsmodel ./backend/middleware ./backend/route ./backend/server`：通过。
+- `npm --prefix frontend/apps/allin-ssl test -- --run src/api/dns.spec.ts src/views/dns/useController.spec.ts`：通过。
+- `npm --prefix frontend/apps/allin-ssl run build`：通过。
+- `npm --prefix frontend/apps/allin-ssl run tsc` 在当前环境中因 Node 堆内存不足退出；已将 Vite 构建作为前端编译验证，未发现本阶段代码构建错误。
+- `git diff --check`：通过；已确认旧 DNSControl 普通页面路由和文档已移除。
 
 ## 提交规则
 
