@@ -15,10 +15,12 @@ import (
 )
 
 var (
-	ErrReadFailed  = errors.New("DNS_READ_FAILED")
-	ErrIncomplete  = errors.New("DNS_INCOMPLETE_RESPONSE")
-	ErrReadLimit   = errors.New("DNS_READ_LIMIT")
-	ErrRemoteDrift = errors.New("REMOTE_DRIFT")
+	ErrReadFailed     = errors.New("DNS_READ_FAILED")
+	ErrIncomplete     = errors.New("DNS_INCOMPLETE_RESPONSE")
+	ErrReadLimit      = errors.New("DNS_READ_LIMIT")
+	ErrRemoteDrift    = errors.New("REMOTE_DRIFT")
+	ErrWriteFailed    = errors.New("DNS_WRITE_FAILED")
+	ErrWriteUncertain = errors.New("DNS_WRITE_UNCERTAIN")
 )
 
 // AliDNSAPI deliberately exposes only read operations.
@@ -26,6 +28,13 @@ type AliDNSAPI interface {
 	DomainInfo(context.Context, *alidns.DescribeDomainInfoRequest) (*alidns.DescribeDomainInfoResponse, error)
 	DomainRecords(context.Context, *alidns.DescribeDomainRecordsRequest) (*alidns.DescribeDomainRecordsResponse, error)
 	Domains(context.Context, *alidns.DescribeDomainsRequest) (*alidns.DescribeDomainsResponse, error)
+}
+
+type aliDNSWriter interface {
+	AddRecord(context.Context, *alidns.AddDomainRecordRequest) (*alidns.AddDomainRecordResponse, error)
+	UpdateRecord(context.Context, *alidns.UpdateDomainRecordRequest) (*alidns.UpdateDomainRecordResponse, error)
+	DeleteRecord(context.Context, *alidns.DeleteDomainRecordRequest) (*alidns.DeleteDomainRecordResponse, error)
+	SetRecordStatus(context.Context, *alidns.SetDomainRecordStatusRequest) (*alidns.SetDomainRecordStatusResponse, error)
 }
 
 type ReaderOptions struct {
@@ -162,6 +171,62 @@ func (r *AliDNSReader) ListZones(ctx context.Context) ([]ZoneSummary, error) {
 		return zones[i].Name < zones[j].Name
 	})
 	return zones, nil
+}
+
+func (r *AliDNSReader) AddRecord(ctx context.Context, zone string, record dnsmodel.Record) error {
+	writer, ok := r.api.(aliDNSWriter)
+	if r == nil || !ok || ctx == nil {
+		return ErrWriteFailed
+	}
+	request, err := addRecordRequest(zone, record)
+	if err != nil {
+		return err
+	}
+	if _, err := writer.AddRecord(ctx, request); err != nil {
+		return writeError(ctx)
+	}
+	return nil
+}
+
+func (r *AliDNSReader) UpdateRecord(ctx context.Context, zone, recordID string, record dnsmodel.Record) error {
+	writer, ok := r.api.(aliDNSWriter)
+	if r == nil || !ok || ctx == nil {
+		return ErrWriteFailed
+	}
+	request, err := updateRecordRequest(zone, recordID, record)
+	if err != nil {
+		return err
+	}
+	if _, err := writer.UpdateRecord(ctx, request); err != nil {
+		return writeError(ctx)
+	}
+	return nil
+}
+
+func (r *AliDNSReader) DeleteRecord(ctx context.Context, zone, recordID string) error {
+	writer, ok := r.api.(aliDNSWriter)
+	if r == nil || !ok || ctx == nil || zone == "" || recordID == "" {
+		return ErrWriteFailed
+	}
+	if _, err := writer.DeleteRecord(ctx, &alidns.DeleteDomainRecordRequest{RecordId: &recordID}); err != nil {
+		return writeError(ctx)
+	}
+	return nil
+}
+
+func (r *AliDNSReader) SetRecordStatus(ctx context.Context, zone, recordID, status string) error {
+	writer, ok := r.api.(aliDNSWriter)
+	if r == nil || !ok || ctx == nil || zone == "" || recordID == "" || (status != "ENABLE" && status != "DISABLE") {
+		return ErrWriteFailed
+	}
+	providerStatus := "Enable"
+	if status == "DISABLE" {
+		providerStatus = "Disable"
+	}
+	if _, err := writer.SetRecordStatus(ctx, &alidns.SetDomainRecordStatusRequest{RecordId: &recordID, Status: &providerStatus}); err != nil {
+		return writeError(ctx)
+	}
+	return nil
 }
 
 func (r *AliDNSReader) readZoneOnce(ctx context.Context, zone string) (dnsmodel.Snapshot, error) {
@@ -336,6 +401,13 @@ func readError(ctx context.Context) error {
 		return ctx.Err()
 	}
 	return ErrReadFailed
+}
+
+func writeError(ctx context.Context) error {
+	if ctx != nil && ctx.Err() != nil {
+		return ErrWriteUncertain
+	}
+	return ErrWriteFailed
 }
 
 func boolPtr(value bool) *bool { return &value }

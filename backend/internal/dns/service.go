@@ -17,18 +17,30 @@ type credentialStore interface {
 	Resolve(context.Context, int64) (Credential, error)
 }
 
-type zoneReader interface {
+type zoneManager interface {
 	ListZones(context.Context) ([]ZoneSummary, error)
 	ReadZone(context.Context, string) (dnsmodel.Snapshot, error)
+	AddRecord(context.Context, string, dnsmodel.Record) error
+	UpdateRecord(context.Context, string, string, dnsmodel.Record) error
+	DeleteRecord(context.Context, string, string) error
+	SetRecordStatus(context.Context, string, string, string) error
 }
 
 type readerFactory interface {
-	New(Credential) (zoneReader, error)
+	New(Credential) (zoneManager, error)
 }
 
 type Service struct {
 	credentials credentialStore
 	readers     readerFactory
+}
+
+type RecordInput struct {
+	Name, Type, Value, Line string
+	TTL                     int64
+	Priority, Weight, Port  *int64
+	CAAFlags                *int64
+	CAATag                  string
 }
 
 func NewService(credentials credentialStore, readers readerFactory) Service {
@@ -62,7 +74,105 @@ func (s Service) ReadZone(ctx context.Context, credentialID int64, zone string) 
 	return reader.ReadZone(ctx, zone)
 }
 
-func (s Service) reader(ctx context.Context, credentialID int64) (zoneReader, error) {
+func (s Service) CreateRecord(ctx context.Context, credentialID int64, zone string, input RecordInput) (dnsmodel.Snapshot, error) {
+	manager, err := s.reader(ctx, credentialID)
+	if err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	current, err := manager.ReadZone(ctx, zone)
+	if err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	record, err := normalizeRecordInput(current, input, "ENABLE")
+	if err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	if err := validateNewRecord(current, record); err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	if err := manager.AddRecord(ctx, zone, record); err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	return manager.ReadZone(ctx, zone)
+}
+
+func (s Service) UpdateRecord(ctx context.Context, credentialID int64, zone, recordID string, input RecordInput) (dnsmodel.Snapshot, error) {
+	manager, err := s.reader(ctx, credentialID)
+	if err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	current, err := manager.ReadZone(ctx, zone)
+	if err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	old, found := findRecord(current, recordID)
+	if !found {
+		return dnsmodel.Snapshot{}, ErrRecordNotFound
+	}
+	if old.Protected {
+		return dnsmodel.Snapshot{}, ErrProtectedRecord
+	}
+	record, err := normalizeRecordInput(current, input, old.Status)
+	if err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	if err := validateNewRecord(removeRecord(current, recordID), record); err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	if err := manager.UpdateRecord(ctx, zone, recordID, record); err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	return manager.ReadZone(ctx, zone)
+}
+
+func (s Service) DeleteRecord(ctx context.Context, credentialID int64, zone, recordID string) (dnsmodel.Snapshot, error) {
+	manager, err := s.reader(ctx, credentialID)
+	if err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	current, err := manager.ReadZone(ctx, zone)
+	if err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	record, found := findRecord(current, recordID)
+	if !found {
+		return dnsmodel.Snapshot{}, ErrRecordNotFound
+	}
+	if record.Protected {
+		return dnsmodel.Snapshot{}, ErrProtectedRecord
+	}
+	if err := manager.DeleteRecord(ctx, zone, recordID); err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	return manager.ReadZone(ctx, zone)
+}
+
+func (s Service) SetRecordStatus(ctx context.Context, credentialID int64, zone, recordID, status string) (dnsmodel.Snapshot, error) {
+	manager, err := s.reader(ctx, credentialID)
+	if err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	current, err := manager.ReadZone(ctx, zone)
+	if err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	record, found := findRecord(current, recordID)
+	if !found {
+		return dnsmodel.Snapshot{}, ErrRecordNotFound
+	}
+	if record.Protected {
+		return dnsmodel.Snapshot{}, ErrProtectedRecord
+	}
+	if status != "ENABLE" && status != "DISABLE" {
+		return dnsmodel.Snapshot{}, ErrInvalidRecord
+	}
+	if err := manager.SetRecordStatus(ctx, zone, recordID, status); err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	return manager.ReadZone(ctx, zone)
+}
+
+func (s Service) reader(ctx context.Context, credentialID int64) (zoneManager, error) {
 	if s.credentials == nil || s.readers == nil || ctx == nil || credentialID <= 0 {
 		return nil, ErrCredential
 	}
@@ -79,7 +189,7 @@ func (s Service) reader(ctx context.Context, credentialID int64) (zoneReader, er
 
 type aliDNSReaderFactory struct{}
 
-func (aliDNSReaderFactory) New(credential Credential) (zoneReader, error) {
+func (aliDNSReaderFactory) New(credential Credential) (zoneManager, error) {
 	if !validCredentialValue(credential.accessKeyID) || !validCredentialValue(credential.accessKeySecret) {
 		return nil, ErrCredential
 	}
@@ -119,6 +229,34 @@ func (c aliDNSClient) Domains(ctx context.Context, request *alidns.DescribeDomai
 		return nil, errors.New("nil AliDNS client")
 	}
 	return alidns.DescribeDomainsWithContext(ctx, c.client, request, aliDNSRuntimeOptions())
+}
+
+func (c aliDNSClient) AddRecord(ctx context.Context, request *alidns.AddDomainRecordRequest) (*alidns.AddDomainRecordResponse, error) {
+	if c.client == nil {
+		return nil, errors.New("nil AliDNS client")
+	}
+	return alidns.AddDomainRecordWithContext(ctx, c.client, request, aliDNSRuntimeOptions())
+}
+
+func (c aliDNSClient) UpdateRecord(ctx context.Context, request *alidns.UpdateDomainRecordRequest) (*alidns.UpdateDomainRecordResponse, error) {
+	if c.client == nil {
+		return nil, errors.New("nil AliDNS client")
+	}
+	return alidns.UpdateDomainRecordWithContext(ctx, c.client, request, aliDNSRuntimeOptions())
+}
+
+func (c aliDNSClient) DeleteRecord(ctx context.Context, request *alidns.DeleteDomainRecordRequest) (*alidns.DeleteDomainRecordResponse, error) {
+	if c.client == nil {
+		return nil, errors.New("nil AliDNS client")
+	}
+	return alidns.DeleteDomainRecordWithContext(ctx, c.client, request, aliDNSRuntimeOptions())
+}
+
+func (c aliDNSClient) SetRecordStatus(ctx context.Context, request *alidns.SetDomainRecordStatusRequest) (*alidns.SetDomainRecordStatusResponse, error) {
+	if c.client == nil {
+		return nil, errors.New("nil AliDNS client")
+	}
+	return alidns.SetDomainRecordStatusWithContext(ctx, c.client, request, aliDNSRuntimeOptions())
 }
 
 func aliDNSRuntimeOptions() *dara.RuntimeOptions { return &dara.RuntimeOptions{} }

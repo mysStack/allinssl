@@ -32,6 +32,13 @@ type fakeZoneReader struct {
 	snapshot dnsmodel.Snapshot
 }
 
+func (r fakeZoneReader) AddRecord(context.Context, string, dnsmodel.Record) error { return nil }
+func (r fakeZoneReader) UpdateRecord(context.Context, string, string, dnsmodel.Record) error {
+	return nil
+}
+func (r fakeZoneReader) DeleteRecord(context.Context, string, string) error            { return nil }
+func (r fakeZoneReader) SetRecordStatus(context.Context, string, string, string) error { return nil }
+
 func (r fakeZoneReader) ListZones(context.Context) ([]ZoneSummary, error) {
 	return r.zones, nil
 }
@@ -41,12 +48,12 @@ func (r fakeZoneReader) ReadZone(context.Context, string) (dnsmodel.Snapshot, er
 }
 
 type fakeReaderFactory struct {
-	reader zoneReader
+	reader zoneManager
 	err    error
 	calls  int
 }
 
-func (f *fakeReaderFactory) New(Credential) (zoneReader, error) {
+func (f *fakeReaderFactory) New(Credential) (zoneManager, error) {
 	f.calls++
 	if f.err != nil {
 		return nil, f.err
