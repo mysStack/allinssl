@@ -64,7 +64,7 @@ func protectedDNSMutation(path string) bool {
 }
 
 func emptyDNSReadRequest(request *http.Request) bool {
-	return request.ContentLength == 0 && request.URL.Path == "/v1/dns/get_credentials"
+	return request.ContentLength == 0 && (request.URL.Path == "/v1/dns/get_credentials" || request.URL.Path == "/v1/dns/get_session")
 }
 
 func hasAPIAuthenticationFields(values map[string][]string) bool {
