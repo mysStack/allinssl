@@ -1,10 +1,8 @@
 package migrations
 
 import (
-	"ALLinSSL/backend/internal/dns"
 	"ALLinSSL/backend/public"
 	"ALLinSSL/backend/public/sqlite_migrate"
-	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -147,9 +145,6 @@ func init() {
 	);
 
 	`)
-	if err := dns.NewStore(db).EnsureSchema(context.Background()); err != nil {
-		fmt.Fprintf(os.Stderr, "初始化 DNS 纳管存储失败: %v\n", err)
-	}
 	insertDefaultData(db, "access_type", `
 	INSERT INTO access_type (name, type) VALUES ('aliyun', 'dns');
 	INSERT INTO access_type (name, type) VALUES ('tencentcloud', 'dns');

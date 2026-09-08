@@ -20,12 +20,12 @@ func TestDNSRequestPreflightRejectsAPITokenAndOversizedBody(t *testing.T) {
 	router := gin.New()
 	router.Use(DNSRequestPreflight())
 	called := false
-	router.POST("/v1/dns/bind_zone", func(context *gin.Context) {
+	router.POST("/v1/dns/create_record", func(context *gin.Context) {
 		called = true
 		context.Status(http.StatusNoContent)
 	})
 
-	apiTokenRequest := httptest.NewRequest(http.MethodPost, "/v1/dns/bind_zone", strings.NewReader(url.Values{
+	apiTokenRequest := httptest.NewRequest(http.MethodPost, "/v1/dns/create_record", strings.NewReader(url.Values{
 		"api_token": {"token"},
 		"timestamp": {"1"},
 	}.Encode()))
@@ -37,7 +37,7 @@ func TestDNSRequestPreflightRejectsAPITokenAndOversizedBody(t *testing.T) {
 	}
 
 	called = false
-	emptyTokenRequest := httptest.NewRequest(http.MethodPost, "/v1/dns/bind_zone", strings.NewReader("api_token=&zone=example.com"))
+	emptyTokenRequest := httptest.NewRequest(http.MethodPost, "/v1/dns/create_record", strings.NewReader("api_token=&zone=example.com"))
 	emptyTokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	emptyTokenResponse := httptest.NewRecorder()
 	router.ServeHTTP(emptyTokenResponse, emptyTokenRequest)
@@ -46,7 +46,7 @@ func TestDNSRequestPreflightRejectsAPITokenAndOversizedBody(t *testing.T) {
 	}
 
 	called = false
-	largeRequest := httptest.NewRequest(http.MethodPost, "/v1/dns/bind_zone", strings.NewReader("zone="+strings.Repeat("a", 64*1024)))
+	largeRequest := httptest.NewRequest(http.MethodPost, "/v1/dns/create_record", strings.NewReader("zone="+strings.Repeat("a", 64*1024)))
 	largeRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	largeResponse := httptest.NewRecorder()
 	router.ServeHTTP(largeResponse, largeRequest)
@@ -136,7 +136,7 @@ func TestDNSSessionRequiredRejectsMissingCSRF(t *testing.T) {
 	dnsRoutes := router.Group("/v1/dns")
 	dnsRoutes.Use(DNSSessionRequired())
 	called := false
-	dnsRoutes.POST("/bind_zone", func(context *gin.Context) {
+	dnsRoutes.POST("/create_record", func(context *gin.Context) {
 		called = true
 		context.Status(http.StatusNoContent)
 	})
@@ -151,7 +151,7 @@ func TestDNSSessionRequiredRejectsMissingCSRF(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/dns/bind_zone", strings.NewReader("zone=example.com"))
+	request := httptest.NewRequest(http.MethodPost, "/v1/dns/create_record", strings.NewReader("zone=example.com"))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Origin", "http://example.com")
 	request.AddCookie(testCookie(t, setupResponse, "session"))
@@ -163,17 +163,17 @@ func TestDNSSessionRequiredRejectsMissingCSRF(t *testing.T) {
 	}
 }
 
-func TestCreateRecordPreviewRejectsCrossOriginRequest(t *testing.T) {
+func TestCreateRecordRejectsCrossOriginRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(DNSRequestPreflight())
 	called := false
-	router.POST("/v1/dns/create_record_preview", func(context *gin.Context) {
+	router.POST("/v1/dns/create_record", func(context *gin.Context) {
 		called = true
 		context.Status(http.StatusNoContent)
 	})
 
-	request := httptest.NewRequest(http.MethodPost, "http://allinssl.test/v1/dns/create_record_preview", strings.NewReader(url.Values{
+	request := httptest.NewRequest(http.MethodPost, "http://allinssl.test/v1/dns/create_record", strings.NewReader(url.Values{
 		"csrf_token": {"csrf-a"},
 	}.Encode()))
 	request.Host = "allinssl.test"
@@ -186,7 +186,7 @@ func TestCreateRecordPreviewRejectsCrossOriginRequest(t *testing.T) {
 	}
 }
 
-func TestCreateRecordPreviewRequiresSessionAndMatchingCSRF(t *testing.T) {
+func TestCreateRecordRequiresSessionAndMatchingCSRF(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(sessions.Sessions("session", memstore.NewStore([]byte("test-secret"))))
@@ -205,12 +205,12 @@ func TestCreateRecordPreviewRequiresSessionAndMatchingCSRF(t *testing.T) {
 	dnsRoutes := router.Group("/v1/dns")
 	dnsRoutes.Use(DNSSessionRequired())
 	called := false
-	dnsRoutes.POST("/create_record_preview", func(context *gin.Context) {
+	dnsRoutes.POST("/create_record", func(context *gin.Context) {
 		called = true
 		context.Status(http.StatusNoContent)
 	})
 
-	missingSession := httptest.NewRequest(http.MethodPost, "/v1/dns/create_record_preview", strings.NewReader("csrf_token=csrf-a"))
+	missingSession := httptest.NewRequest(http.MethodPost, "/v1/dns/create_record", strings.NewReader("csrf_token=csrf-a"))
 	missingSession.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	missingSession.Header.Set("Origin", "http://example.com")
 	missingSessionResponse := httptest.NewRecorder()
@@ -244,7 +244,7 @@ func TestCreateRecordPreviewRequiresSessionAndMatchingCSRF(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			called = false
-			request := httptest.NewRequest(http.MethodPost, "/v1/dns/create_record_preview", strings.NewReader(url.Values{
+			request := httptest.NewRequest(http.MethodPost, "/v1/dns/create_record", strings.NewReader(url.Values{
 				"csrf_token": {test.token},
 			}.Encode()))
 			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")

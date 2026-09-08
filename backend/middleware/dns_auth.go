@@ -60,11 +60,11 @@ func DNSRequestPreflight() gin.HandlerFunc {
 }
 
 func protectedDNSMutation(path string) bool {
-	return path == "/v1/dns/bind_zone" || path == "/v1/dns/create_record_preview"
+	return path == "/v1/dns/create_record" || path == "/v1/dns/update_record" || path == "/v1/dns/delete_record" || path == "/v1/dns/set_record_status"
 }
 
 func emptyDNSReadRequest(request *http.Request) bool {
-	return request.ContentLength == 0 && (request.URL.Path == "/v1/dns/get_credentials" || request.URL.Path == "/v1/dns/get_health")
+	return request.ContentLength == 0 && request.URL.Path == "/v1/dns/get_credentials"
 }
 
 func hasAPIAuthenticationFields(values map[string][]string) bool {

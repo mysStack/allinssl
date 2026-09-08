@@ -102,10 +102,6 @@ func Register(r *gin.Engine) {
 		dns.POST("/get_credentials", handler.GetCredentials)
 		dns.POST("/get_zones", handler.GetZones)
 		dns.POST("/get_snapshot", handler.GetSnapshot)
-		dns.POST("/get_health", handler.GetHealth)
-		dns.POST("/bind_zone", handler.BindZone)
-		dns.POST("/create_record_preview", handler.CreateRecordPreview)
-		dns.POST("/get_job", handler.GetJob)
 	}
 	setting := v1.Group("/setting")
 	{

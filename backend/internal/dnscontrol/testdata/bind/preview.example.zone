@@ -1,8 +1,0 @@
-$ORIGIN preview.example.
-$TTL 300
-@ IN SOA ns1.preview.example. hostmaster.preview.example. (
-  2026090600 3600 600 604800 300
-)
-@ IN NS ns1.preview.example.
-ns1 IN A 192.0.2.53
-www IN A 192.0.2.10
