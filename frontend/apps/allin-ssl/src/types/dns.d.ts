@@ -21,6 +21,11 @@ export interface DNSRecord {
 	status: string
 	protected: boolean
 	read_only_reasons?: string[]
+	priority?: number
+	weight?: number
+	port?: number
+	caa_flags?: number
+	caa_tag?: string
 }
 
 export interface DNSSnapshot {
@@ -34,6 +39,35 @@ export interface DNSSnapshot {
 	read_only_reasons: string[]
 }
 
+export type DNSRecordType = 'A' | 'AAAA' | 'CNAME' | 'TXT' | 'MX' | 'SRV' | 'CAA'
+
+export interface DNSRecordInput {
+	name: string
+	type: DNSRecordType
+	ttl: number
+	value: string
+	line: string
+	priority?: number
+	weight?: number
+	port?: number
+	caaFlags?: number
+	caaTag?: string
+}
+
+export interface DNSRecordMutationInput {
+	credentialID: number
+	zone: string
+	recordID?: string
+	record?: DNSRecordInput
+	status?: 'ENABLE' | 'DISABLE'
+	csrfToken: string
+}
+
+export interface DNSSession {
+	csrf_token: string
+}
+
 export type DNSCredentialsResponse = AxiosResponseData<DNSCredential[]>
 export type DNSZonesResponse = AxiosResponseData<DNSZone[]>
 export type DNSSnapshotResponse = AxiosResponseData<DNSSnapshot>
+export type DNSSessionResponse = AxiosResponseData<DNSSession>
