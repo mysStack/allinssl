@@ -8,9 +8,7 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
 	corepack enable && \
 	pnpm install --no-frozen-lockfile --store-dir=/pnpm/store && \
 	pnpm rebuild esbuild && \
-	pnpm --filter @baota/vite-plugin-ftp-sync build && \
-	pnpm --filter @baota/vite-plugin-turborepo-deploy build && \
-	pnpm --filter allin-ssl build
+	pnpm --filter allin-ssl... run build
 
 # Backend build stage
 FROM golang:1.24-alpine AS builder
