@@ -6,7 +6,7 @@ WORKDIR /frontend
 COPY frontend/ ./
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
 	corepack enable && \
-	pnpm install --frozen-lockfile --store-dir=/pnpm/store && \
+	pnpm install --no-frozen-lockfile --store-dir=/pnpm/store && \
 	pnpm rebuild esbuild && \
 	pnpm --filter @baota/vite-plugin-ftp-sync build && \
 	pnpm --filter @baota/vite-plugin-turborepo-deploy build && \
