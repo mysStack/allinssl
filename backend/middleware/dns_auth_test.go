@@ -94,7 +94,7 @@ func TestDNSSessionRequiredRejectsMissingOrStaleApplicationLogin(t *testing.T) {
 					context.Status(http.StatusInternalServerError)
 					return
 				}
-				http.SetCookie(context.Writer, dns.NewSessionCookie(identity))
+				http.SetCookie(context.Writer, dns.NewSessionCookieForRequest(identity, context.Request))
 				context.Status(http.StatusNoContent)
 			})
 			dnsRoutes := router.Group("/v1/dns")
@@ -107,7 +107,7 @@ func TestDNSSessionRequiredRejectsMissingOrStaleApplicationLogin(t *testing.T) {
 			router.ServeHTTP(setupResponse, httptest.NewRequest(http.MethodPost, "/setup", nil))
 			request := httptest.NewRequest(http.MethodPost, "/v1/dns/get_credentials", nil)
 			request.AddCookie(testCookie(t, setupResponse, "session"))
-			request.AddCookie(testCookie(t, setupResponse, dns.SessionCookieName))
+			request.AddCookie(testCookie(t, setupResponse, dns.InsecureSessionCookieName))
 			response := httptest.NewRecorder()
 			router.ServeHTTP(response, request)
 			if response.Code != http.StatusUnauthorized {
@@ -130,7 +130,7 @@ func TestDNSSessionRequiredRejectsMissingCSRF(t *testing.T) {
 			context.Status(http.StatusInternalServerError)
 			return
 		}
-		http.SetCookie(context.Writer, dns.NewSessionCookie(identity))
+		http.SetCookie(context.Writer, dns.NewSessionCookieForRequest(identity, context.Request))
 		context.JSON(http.StatusOK, gin.H{"csrf": identity.CSRFToken})
 	})
 	dnsRoutes := router.Group("/v1/dns")
@@ -155,7 +155,7 @@ func TestDNSSessionRequiredRejectsMissingCSRF(t *testing.T) {
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Origin", "http://example.com")
 	request.AddCookie(testCookie(t, setupResponse, "session"))
-	request.AddCookie(testCookie(t, setupResponse, dns.SessionCookieName))
+	request.AddCookie(testCookie(t, setupResponse, dns.InsecureSessionCookieName))
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden || called {
@@ -199,7 +199,7 @@ func TestCreateRecordRequiresSessionAndMatchingCSRF(t *testing.T) {
 			context.Status(http.StatusInternalServerError)
 			return
 		}
-		http.SetCookie(context.Writer, dns.NewSessionCookie(identity))
+		http.SetCookie(context.Writer, dns.NewSessionCookieForRequest(identity, context.Request))
 		context.JSON(http.StatusOK, gin.H{"csrf": identity.CSRFToken})
 	})
 	dnsRoutes := router.Group("/v1/dns")
@@ -229,7 +229,7 @@ func TestCreateRecordRequiresSessionAndMatchingCSRF(t *testing.T) {
 		t.Fatal(err)
 	}
 	applicationCookie := testCookie(t, setupResponse, "session")
-	dnsCookie := testCookie(t, setupResponse, dns.SessionCookieName)
+	dnsCookie := testCookie(t, setupResponse, dns.InsecureSessionCookieName)
 
 	for _, test := range []struct {
 		name   string

@@ -98,7 +98,7 @@ func DNSSessionRequired() gin.HandlerFunc {
 			context.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
-		binding, err := context.Request.Cookie(dns.SessionCookieName)
+		binding, err := context.Request.Cookie(dns.SessionCookieNameForRequest(context.Request))
 		if err != nil || !dns.ValidateSessionBinding(identity, binding.Value) {
 			context.AbortWithStatus(http.StatusUnauthorized)
 			return

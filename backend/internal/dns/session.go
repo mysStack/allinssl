@@ -6,18 +6,20 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-contrib/sessions"
 )
 
 const (
-	dnsActorKey       = "dns_actor"
-	dnsSessionIDKey   = "dns_session_id"
-	dnsAuthEpochKey   = "dns_auth_epoch"
-	dnsCSRFTokenKey   = "dns_csrf_token"
-	defaultDNSActorID = "local-admin"
-	SessionCookieName = "__Secure-allinssl-dns-session"
+	dnsActorKey               = "dns_actor"
+	dnsSessionIDKey           = "dns_session_id"
+	dnsAuthEpochKey           = "dns_auth_epoch"
+	dnsCSRFTokenKey           = "dns_csrf_token"
+	defaultDNSActorID         = "local-admin"
+	SessionCookieName         = "__Secure-allinssl-dns-session"
+	InsecureSessionCookieName = "allinssl-dns-session"
 )
 
 var ErrDNSSession = errors.New("DNS_SESSION_REQUIRED")
@@ -88,22 +90,50 @@ func ValidateSessionBinding(identity SessionIdentity, binding string) bool {
 }
 
 func NewSessionCookie(identity SessionIdentity) *http.Cookie {
-	return dnsSessionCookie(identity.SessionID, 0)
+	return dnsSessionCookie(SessionCookieName, identity.SessionID, true, 0)
 }
 
 func ExpiredSessionCookie() *http.Cookie {
-	cookie := dnsSessionCookie("", -1)
+	cookie := dnsSessionCookie(SessionCookieName, "", true, -1)
 	cookie.Expires = time.Unix(1, 0)
 	return cookie
 }
 
-func dnsSessionCookie(value string, maxAge int) *http.Cookie {
+func NewSessionCookieForRequest(identity SessionIdentity, request *http.Request) *http.Cookie {
+	secure := RequestUsesHTTPS(request)
+	return dnsSessionCookie(SessionCookieNameForRequest(request), identity.SessionID, secure, 0)
+}
+
+func ExpiredSessionCookieForRequest(request *http.Request) *http.Cookie {
+	cookie := dnsSessionCookie(SessionCookieNameForRequest(request), "", RequestUsesHTTPS(request), -1)
+	cookie.Expires = time.Unix(1, 0)
+	return cookie
+}
+
+func SessionCookieNameForRequest(request *http.Request) string {
+	if RequestUsesHTTPS(request) {
+		return SessionCookieName
+	}
+	return InsecureSessionCookieName
+}
+
+func RequestUsesHTTPS(request *http.Request) bool {
+	if request == nil {
+		return false
+	}
+	if request.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(strings.Split(request.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
+}
+
+func dnsSessionCookie(name, value string, secure bool, maxAge int) *http.Cookie {
 	return &http.Cookie{
-		Name:     SessionCookieName,
+		Name:     name,
 		Value:    value,
 		Path:     "/v1/dns",
 		MaxAge:   maxAge,
-		Secure:   true,
+		Secure:   secure,
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 	}

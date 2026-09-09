@@ -125,6 +125,27 @@ func TestRegisteredLoginRotatesDNSBindingAndRealRoutesRequireSessionAndCSRF(t *t
 	}
 }
 
+func TestRegisteredLoginAllowsDNSCookieOverHTTP(t *testing.T) {
+	router := newTestRegisteredRouter(t)
+	form := url.Values{"username": {"admin"}, "password": {"password"}}
+	request := httptest.NewRequest(http.MethodPost, "http://allinssl.test/v1/login/sign", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	response := serveRequest(router, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("login status/body = %d/%s", response.Code, response.Body.String())
+	}
+	dnsCookie := namedCookie(t, response, dns.SessionCookieNameForRequest(request))
+	if dnsCookie.Name != dns.InsecureSessionCookieName || dnsCookie.Secure {
+		t.Fatalf("HTTP login returned an invalid DNS cookie: %#v", dnsCookie)
+	}
+	applicationCookie := namedCookie(t, response, public.SessionKey)
+	authorizedRequest := httptest.NewRequest(http.MethodPost, "http://allinssl.test/v1/dns/get_credentials", nil)
+	authorizedRequest.AddCookie(applicationCookie)
+	authorizedRequest.AddCookie(dnsCookie)
+	assertServerStatus(t, router, authorizedRequest, http.StatusOK)
+}
+
 func registeredServerCSRF(t *testing.T, router http.Handler, applicationCookie, dnsCookie *http.Cookie) string {
 	t.Helper()
 	request := newDNSRequest("/v1/dns/get_session", "")

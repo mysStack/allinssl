@@ -144,7 +144,7 @@ func Sign(c *gin.Context) {
 		public.FailMsg(c, "登录会话保存失败")
 		return
 	}
-	http.SetCookie(c.Writer, dns.NewSessionCookie(identity))
+	http.SetCookie(c.Writer, dns.NewSessionCookieForRequest(identity, c.Request))
 	// c.JSON(http.StatusOK, public.ResOK(0, nil, "登录成功"))
 	// 设置cookie
 	c.SetCookie("must_code", "1", -1, "/", "", false, false)
@@ -170,7 +170,7 @@ func SignOut(c *gin.Context) {
 		public.FailMsg(c, "登出会话保存失败")
 		return
 	}
-	http.SetCookie(c.Writer, dns.ExpiredSessionCookie())
+	http.SetCookie(c.Writer, dns.ExpiredSessionCookieForRequest(c.Request))
 	// c.JSON(http.StatusOK, public.ResOK(0, nil, "登出成功"))
 	public.SuccessMsg(c, "登出成功")
 	return
