@@ -1,0 +1,18 @@
+services:
+  allinssl:
+    image: ${ALLINSSL_IMAGE:-ghcr.io/mysstack/allinssl:custom}
+    container_name: allinssl
+    restart: unless-stopped
+    env_file:
+      - ${ALLINSSL_ENV_FILE:-.env}
+    ports:
+      - "${ALLINSSL_PORT:-8888}:8888"
+    volumes:
+      - allinssl-data:/www/allinssl/data
+      - allinssl-logs:/www/allinssl/logs
+      - allinssl-plugins:/www/allinssl/plugins
+
+volumes:
+  allinssl-data:
+  allinssl-logs:
+  allinssl-plugins:
