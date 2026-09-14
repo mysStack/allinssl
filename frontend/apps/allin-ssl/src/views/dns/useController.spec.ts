@@ -34,4 +34,13 @@ describe('createDNSController', () => {
 		expect(controller.canManageRecord({ provider_record_id: '1', name: '@', type: 'NS', ttl: 600, value: 'ns1.example.com', line: 'default', status: 'ENABLE', protected: false })).toBe(false)
 		expect(controller.canManageRecord({ provider_record_id: '2', name: '_acme-challenge', type: 'TXT', ttl: 600, value: 'token', line: 'default', status: 'ENABLE', protected: true })).toBe(false)
 	})
+
+	it('allows changing an editable record type while preserving its other fields', () => {
+		const controller = createDNSController({ getCredentials: vi.fn(), getZones: vi.fn(), getSnapshot: vi.fn(), getSession: vi.fn(), createRecord: vi.fn(), updateRecord: vi.fn(), deleteRecord: vi.fn(), setRecordStatus: vi.fn() })
+		controller.openEditRecordForm({ provider_record_id: '1', name: 'argo', type: 'CNAME', ttl: 600, value: 'alb.example.com.', line: 'default', status: 'ENABLE', protected: false })
+
+		controller.setRecordType('A')
+
+		expect(controller.recordForm.value).toEqual({ name: 'argo', type: 'A', ttl: 600, value: 'alb.example.com.', line: 'default' })
+	})
 })

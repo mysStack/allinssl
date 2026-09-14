@@ -138,6 +138,10 @@ export const createDNSController = (gateway: DNSGateway) => {
 		recordModalVisible.value = true
 	}
 
+	const setRecordType = (type: DNSRecordInput['type']) => {
+		recordForm.value = { name: recordForm.value.name, type, ttl: recordForm.value.ttl, value: recordForm.value.value, line: recordForm.value.line }
+	}
+
 	const saveRecord = async () => {
 		if (!credentialID.value || !zone.value || !validRecordForm(recordForm.value)) {
 			error.value = '请完整填写 DNS 记录字段'
@@ -181,7 +185,7 @@ export const createDNSController = (gateway: DNSGateway) => {
 		}
 	}
 
-	return { credentials, zones, snapshot, credentialID, zone, loading, mutationLoading, error, credentialOptions, zoneOptions, recordFilters, visibleRecords, recordModalVisible, editingRecordID, recordForm, setRecordSort, refreshCredentials, refreshZones, refreshSnapshot, refreshSession, setZone, canManageRecord, openCreateRecordForm, openEditRecordForm, saveRecord, deleteRecord, toggleRecordStatus }
+	return { credentials, zones, snapshot, credentialID, zone, loading, mutationLoading, error, credentialOptions, zoneOptions, recordFilters, visibleRecords, recordModalVisible, editingRecordID, recordForm, setRecordSort, refreshCredentials, refreshZones, refreshSnapshot, refreshSession, setZone, canManageRecord, openCreateRecordForm, openEditRecordForm, setRecordType, saveRecord, deleteRecord, toggleRecordStatus }
 }
 
 const validRecordForm = (record: DNSRecordInput) => {

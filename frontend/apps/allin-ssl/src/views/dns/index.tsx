@@ -2,7 +2,7 @@ import { NAlert, NButton, NCard, NDataTable, NForm, NFormItem, NInput, NInputNum
 
 import BaseLayout from '@components/BaseLayout'
 
-import type { DNSRecord, DNSRecordInput, DNSRecordType } from '@/types/dns'
+import type { DNSRecord, DNSRecordInput } from '@/types/dns'
 
 import type { DNSRecordSortKey } from './useController'
 
@@ -14,9 +14,6 @@ export default defineComponent({
 	name: 'DNS',
 	setup() {
 		const controller = useController()
-		const updateRecordType = (type: DNSRecordType) => {
-			controller.recordForm.value = { name: controller.recordForm.value.name, type, ttl: controller.recordForm.value.ttl, value: controller.recordForm.value.value, line: controller.recordForm.value.line }
-		}
 		const columns: DataTableColumns<DNSRecord> = [
 			{ title: '主机记录', key: 'name', width: 180, ellipsis: { tooltip: true }, sorter: true },
 			{ title: '类型', key: 'type', width: 90, sorter: true },
@@ -85,7 +82,7 @@ export default defineComponent({
 						<NCard title={controller.editingRecordID.value ? '编辑 DNS 记录' : '添加 DNS 记录'} closable style={{ width: '560px' }} onClose={() => (controller.recordModalVisible.value = false)}>
 							<NForm labelPlacement="left" labelWidth={90}>
 								<NFormItem label="主机记录"><NInput value={controller.recordForm.value.name} placeholder="例如 www" onUpdateValue={(value) => (controller.recordForm.value.name = value)} /></NFormItem>
-								<NFormItem label="记录类型"><NSelect value={controller.recordForm.value.type} options={recordTypeOptions} disabled={Boolean(controller.editingRecordID.value)} onUpdateValue={updateRecordType} /></NFormItem>
+								<NFormItem label="记录类型"><NSelect value={controller.recordForm.value.type} options={recordTypeOptions} onUpdateValue={controller.setRecordType} /></NFormItem>
 								<NFormItem label="记录值"><NInput value={controller.recordForm.value.value} placeholder="请输入记录值" onUpdateValue={(value) => (controller.recordForm.value.value = value)} /></NFormItem>
 								<NFormItem label="TTL"><NInputNumber value={controller.recordForm.value.ttl} min={600} max={86400} step={60} class="w-full" onUpdateValue={(value) => (controller.recordForm.value.ttl = value ?? 600)} /></NFormItem>
 								<NFormItem label="解析线路"><NInput value={controller.recordForm.value.line} placeholder="default" onUpdateValue={(value) => (controller.recordForm.value.line = value)} /></NFormItem>
