@@ -29,6 +29,10 @@ func SessionAuthMiddleware() gin.HandlerFunc {
 
 		routePath := c.Request.URL.Path
 		method := c.Request.Method
+		if routePath == "/favicon.ico" || (method == http.MethodGet && strings.HasPrefix(routePath, "/static/")) {
+			c.Next()
+			return
+		}
 		paths := strings.Split(strings.TrimPrefix(routePath, "/"), "/")
 		session := sessions.Default(c)
 		now := time.Now()
@@ -91,17 +95,7 @@ func SessionAuthMiddleware() gin.HandlerFunc {
 									return
 								}
 							}
-							if routePath == "/favicon.ico" {
-								return
-							}
-							// 判断是否为静态文件路径
-							if method == "GET" {
-								if len(paths) > 1 && paths[0] == "static" {
-									c.Next()
-									return
-								}
-							}
-							// 返回登录页
+			// 返回登录页
 							c.Redirect(http.StatusFound, "/login")
 							c.Abort()
 							return
