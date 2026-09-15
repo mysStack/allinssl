@@ -9,6 +9,19 @@ import type { DNSRecordSortKey } from './useController'
 import { useController } from './useController'
 
 const recordTypeOptions = ['A', 'AAAA', 'CNAME', 'TXT', 'MX', 'SRV', 'CAA'].map((value) => ({ label: value, value }))
+const loadBalancingPolicyOptions = [{ label: '轮询', value: 'round_robin' }, { label: '权重', value: 'weight' }]
+
+const recordValuePlaceholder = (type: DNSRecordInput['type']) => {
+	switch (type) {
+	case 'A': return '例如 203.0.113.10'
+	case 'AAAA': return '例如 2001:db8::10'
+	case 'CNAME': return '例如 target.example.com.'
+	case 'MX': return '例如 mail.example.com.'
+	case 'SRV': return '例如 service.example.com.'
+	case 'CAA': return '例如 letsencrypt.org'
+	default: return '请输入记录值'
+	}
+}
 
 export default defineComponent({
 	name: 'DNS',
@@ -81,13 +94,15 @@ export default defineComponent({
 					<NModal show={controller.recordModalVisible.value} onUpdateShow={(show) => (controller.recordModalVisible.value = show)}>
 						<NCard title={controller.editingRecordID.value ? '编辑 DNS 记录' : '添加 DNS 记录'} closable style={{ width: '560px' }} onClose={() => (controller.recordModalVisible.value = false)}>
 							<NForm labelPlacement="left" labelWidth={90}>
+								{controller.editingRecordID.value ? <NAlert type="info" showIcon class="mb-4">切换记录类型会更新当前记录，不会新增第二条记录。保存 A/AAAA 记录时，请将记录值改为对应的 IP 地址。</NAlert> : null}
 								<NFormItem label="主机记录"><NInput value={controller.recordForm.value.name} placeholder="例如 www" onUpdateValue={(value) => (controller.recordForm.value.name = value)} /></NFormItem>
 								<NFormItem label="记录类型"><NSelect value={controller.recordForm.value.type} options={recordTypeOptions} onUpdateValue={controller.setRecordType} /></NFormItem>
-								<NFormItem label="记录值"><NInput value={controller.recordForm.value.value} placeholder="请输入记录值" onUpdateValue={(value) => (controller.recordForm.value.value = value)} /></NFormItem>
+								<NFormItem label="记录值"><NInput value={controller.recordForm.value.value} placeholder={recordValuePlaceholder(controller.recordForm.value.type)} onUpdateValue={(value) => (controller.recordForm.value.value = value)} /></NFormItem>
 								<NFormItem label="TTL"><NInputNumber value={controller.recordForm.value.ttl} min={600} max={86400} step={60} class="w-full" onUpdateValue={(value) => (controller.recordForm.value.ttl = value ?? 600)} /></NFormItem>
 								<NFormItem label="解析线路"><NInput value={controller.recordForm.value.line} placeholder="default" onUpdateValue={(value) => (controller.recordForm.value.line = value)} /></NFormItem>
+								{controller.recordForm.value.type === 'A' || controller.recordForm.value.type === 'AAAA' ? <><NFormItem label="记录值负载策略"><NSelect value={controller.recordForm.value.loadBalancingPolicy} options={loadBalancingPolicyOptions} onUpdateValue={(value) => (controller.recordForm.value.loadBalancingPolicy = value as DNSRecordInput['loadBalancingPolicy'])} /></NFormItem>{controller.recordForm.value.loadBalancingPolicy === 'weight' ? <NFormItem label="权重"><NInputNumber value={controller.recordForm.value.loadBalancingWeight} min={1} max={100} class="w-full" onUpdateValue={(value) => (controller.recordForm.value.loadBalancingWeight = value ?? 1)} /></NFormItem> : null}<NAlert type="warning" showIcon class="mb-4">策略作用于同名、同类型、同线路的记录集；“权重”会开启 AliDNS DNSLB，并为当前记录设置 1 至 100 的权重。</NAlert></> : null}
 								{controller.recordForm.value.type === 'MX' || controller.recordForm.value.type === 'SRV' ? <NFormItem label="优先级"><NInputNumber value={controller.recordForm.value.priority} min={0} max={65535} class="w-full" onUpdateValue={(value) => (controller.recordForm.value.priority = value ?? 0)} /></NFormItem> : null}
-								{controller.recordForm.value.type === 'SRV' ? <><NFormItem label="权重"><NInputNumber value={controller.recordForm.value.weight} min={0} max={65535} class="w-full" onUpdateValue={(value) => (controller.recordForm.value.weight = value ?? 0)} /></NFormItem><NFormItem label="端口"><NInputNumber value={controller.recordForm.value.port} min={1} max={65535} class="w-full" onUpdateValue={(value) => (controller.recordForm.value.port = value ?? 1)} /></NFormItem></> : null}
+								{controller.recordForm.value.type === 'SRV' ? <><NFormItem label="SRV 权重"><NInputNumber value={controller.recordForm.value.weight} min={0} max={65535} class="w-full" onUpdateValue={(value) => (controller.recordForm.value.weight = value ?? 0)} /></NFormItem><NFormItem label="端口"><NInputNumber value={controller.recordForm.value.port} min={1} max={65535} class="w-full" onUpdateValue={(value) => (controller.recordForm.value.port = value ?? 1)} /></NFormItem></> : null}
 								{controller.recordForm.value.type === 'CAA' ? <><NFormItem label="Flags"><NInputNumber value={controller.recordForm.value.caaFlags} min={0} max={255} class="w-full" onUpdateValue={(value) => (controller.recordForm.value.caaFlags = value ?? 0)} /></NFormItem><NFormItem label="Tag"><NInput value={controller.recordForm.value.caaTag} placeholder="issue" onUpdateValue={(value) => (controller.recordForm.value.caaTag = value)} /></NFormItem></> : null}
 								<div class="flex justify-end gap-3"><NButton onClick={() => (controller.recordModalVisible.value = false)}>取消</NButton><NButton type="primary" loading={controller.mutationLoading.value} onClick={controller.saveRecord}>保存</NButton></div>
 							</NForm>

@@ -24,6 +24,7 @@ type zoneManager interface {
 	UpdateRecord(context.Context, string, string, dnsmodel.Record) error
 	DeleteRecord(context.Context, string, string) error
 	SetRecordStatus(context.Context, string, string, string) error
+	SetRecordLoadBalancing(context.Context, string, string, dnsmodel.Record) error
 }
 
 type readerFactory interface {
@@ -41,6 +42,8 @@ type RecordInput struct {
 	Priority, Weight, Port  *int64
 	CAAFlags                *int64
 	CAATag                  string
+	LoadBalancingPolicy     string
+	LoadBalancingWeight     *int64
 }
 
 func NewService(credentials credentialStore, readers readerFactory) Service {
@@ -93,6 +96,19 @@ func (s Service) CreateRecord(ctx context.Context, credentialID int64, zone stri
 	if err := manager.AddRecord(ctx, zone, record); err != nil {
 		return dnsmodel.Snapshot{}, err
 	}
+	updated, err := manager.ReadZone(ctx, zone)
+	if err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	created, found := findNewRecord(updated, record)
+	if !found {
+		return dnsmodel.Snapshot{}, ErrWriteUncertain
+	}
+	created.LoadBalancingPolicy = record.LoadBalancingPolicy
+	created.LoadBalancingWeight = record.LoadBalancingWeight
+	if err := setRecordLoadBalancing(ctx, manager, zone, created.ProviderRecordID, created); err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
 	return manager.ReadZone(ctx, zone)
 }
 
@@ -122,7 +138,26 @@ func (s Service) UpdateRecord(ctx context.Context, credentialID int64, zone, rec
 	if err := manager.UpdateRecord(ctx, zone, recordID, record); err != nil {
 		return dnsmodel.Snapshot{}, err
 	}
+	if err := setRecordLoadBalancing(ctx, manager, zone, recordID, record); err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
 	return manager.ReadZone(ctx, zone)
+}
+
+func findNewRecord(snapshot dnsmodel.Snapshot, wanted dnsmodel.Record) (dnsmodel.Record, bool) {
+	for _, record := range snapshot.Records {
+		if !record.Protected && sameRecordContent(record, wanted) {
+			return record, true
+		}
+	}
+	return dnsmodel.Record{}, false
+}
+
+func setRecordLoadBalancing(ctx context.Context, manager zoneManager, zone, recordID string, record dnsmodel.Record) error {
+	if record.Type != "A" && record.Type != "AAAA" {
+		return nil
+	}
+	return manager.SetRecordLoadBalancing(ctx, zone, recordID, record)
 }
 
 func (s Service) DeleteRecord(ctx context.Context, credentialID int64, zone, recordID string) (dnsmodel.Snapshot, error) {
@@ -257,6 +292,20 @@ func (c aliDNSClient) SetRecordStatus(ctx context.Context, request *alidns.SetDo
 		return nil, errors.New("nil AliDNS client")
 	}
 	return alidns.SetDomainRecordStatusWithContext(ctx, c.client, request, aliDNSRuntimeOptions())
+}
+
+func (c aliDNSClient) SetDNSSLBStatus(ctx context.Context, request *alidns.SetDNSSLBStatusRequest) (*alidns.SetDNSSLBStatusResponse, error) {
+	if c.client == nil {
+		return nil, errors.New("nil AliDNS client")
+	}
+	return alidns.SetDNSSLBStatusWithContext(ctx, c.client, request, aliDNSRuntimeOptions())
+}
+
+func (c aliDNSClient) UpdateDNSSLBWeight(ctx context.Context, request *alidns.UpdateDNSSLBWeightRequest) (*alidns.UpdateDNSSLBWeightResponse, error) {
+	if c.client == nil {
+		return nil, errors.New("nil AliDNS client")
+	}
+	return alidns.UpdateDNSSLBWeightWithContext(ctx, c.client, request, aliDNSRuntimeOptions())
 }
 
 func aliDNSRuntimeOptions() *dara.RuntimeOptions { return &dara.RuntimeOptions{} }

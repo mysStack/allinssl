@@ -24,7 +24,16 @@ func normalizeRecordInput(snapshot dnsmodel.Snapshot, input RecordInput, status 
 	record := dnsmodel.Record{
 		Name: input.Name, Type: strings.ToUpper(strings.TrimSpace(input.Type)), TTL: input.TTL, Value: input.Value,
 		Priority: input.Priority, Weight: input.Weight, Port: input.Port, CAAFlags: input.CAAFlags, CAATag: input.CAATag,
+		LoadBalancingPolicy: input.LoadBalancingPolicy, LoadBalancingWeight: input.LoadBalancingWeight,
 		Line: "default", Status: "ENABLE",
+	}
+	if record.Type == "A" || record.Type == "AAAA" {
+		if record.LoadBalancingPolicy == "" {
+			record.LoadBalancingPolicy = "round_robin"
+		}
+		if record.LoadBalancingPolicy == "round_robin" {
+			record.LoadBalancingWeight = nil
+		}
 	}
 	probe, err := dnsmodel.BuildSnapshot(snapshot.Zone, []dnsmodel.Record{record}, snapshot.Limits)
 	if err != nil || !probe.Compatible || len(probe.Records) != 1 {

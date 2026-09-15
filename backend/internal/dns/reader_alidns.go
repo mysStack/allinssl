@@ -35,6 +35,8 @@ type aliDNSWriter interface {
 	UpdateRecord(context.Context, *alidns.UpdateDomainRecordRequest) (*alidns.UpdateDomainRecordResponse, error)
 	DeleteRecord(context.Context, *alidns.DeleteDomainRecordRequest) (*alidns.DeleteDomainRecordResponse, error)
 	SetRecordStatus(context.Context, *alidns.SetDomainRecordStatusRequest) (*alidns.SetDomainRecordStatusResponse, error)
+	SetDNSSLBStatus(context.Context, *alidns.SetDNSSLBStatusRequest) (*alidns.SetDNSSLBStatusResponse, error)
+	UpdateDNSSLBWeight(context.Context, *alidns.UpdateDNSSLBWeightRequest) (*alidns.UpdateDNSSLBWeightResponse, error)
 }
 
 type ReaderOptions struct {
@@ -229,6 +231,32 @@ func (r *AliDNSReader) SetRecordStatus(ctx context.Context, zone, recordID, stat
 	return nil
 }
 
+func (r *AliDNSReader) SetRecordLoadBalancing(ctx context.Context, zone, recordID string, record dnsmodel.Record) error {
+	writer, ok := r.api.(aliDNSWriter)
+	if r == nil || !ok || ctx == nil || recordID == "" || (record.Type != "A" && record.Type != "AAAA") || (record.LoadBalancingPolicy != "round_robin" && record.LoadBalancingPolicy != "weight") {
+		return ErrWriteFailed
+	}
+	if record.LoadBalancingPolicy == "weight" && (record.LoadBalancingWeight == nil || *record.LoadBalancingWeight < 1 || *record.LoadBalancingWeight > 100) {
+		return ErrInvalidRecord
+	}
+	subDomain := record.Name + "." + zone
+	if record.Name == "@" {
+		subDomain = "@." + zone
+	}
+	open := record.LoadBalancingPolicy == "weight"
+	if _, err := writer.SetDNSSLBStatus(ctx, &alidns.SetDNSSLBStatusRequest{DomainName: &zone, SubDomain: &subDomain, Type: &record.Type, Line: &record.Line, Open: &open}); err != nil {
+		return writeError(ctx)
+	}
+	if !open {
+		return nil
+	}
+	weight := int32(*record.LoadBalancingWeight)
+	if _, err := writer.UpdateDNSSLBWeight(ctx, &alidns.UpdateDNSSLBWeightRequest{RecordId: &recordID, Weight: &weight}); err != nil {
+		return writeError(ctx)
+	}
+	return nil
+}
+
 func (r *AliDNSReader) readZoneOnce(ctx context.Context, zone string) (dnsmodel.Snapshot, error) {
 	zoneInfo, err := r.api.DomainInfo(ctx, &alidns.DescribeDomainInfoRequest{
 		DomainName:           &zone,
@@ -340,6 +368,8 @@ func convertRecord(zone string, source *alidns.DescribeDomainRecordsResponseBody
 		weight := int64(*source.Weight)
 		if record.Type == "SRV" {
 			record.Weight = &weight
+		} else if (record.Type == "A" || record.Type == "AAAA") && source.LbaStatus != nil && *source.LbaStatus {
+			record.LoadBalancingWeight = &weight
 		} else if weight != 1 {
 			setMetadata(&record, "weight", fmt.Sprint(weight))
 		}
@@ -350,8 +380,11 @@ func convertRecord(zone string, source *alidns.DescribeDomainRecordsResponseBody
 	if source.Locked != nil && *source.Locked {
 		setMetadata(&record, "locked", "true")
 	}
-	if source.LbaStatus != nil && *source.LbaStatus {
-		setMetadata(&record, "lba_status", "true")
+	if record.Type == "A" || record.Type == "AAAA" {
+		record.LoadBalancingPolicy = "round_robin"
+		if source.LbaStatus != nil && *source.LbaStatus {
+			record.LoadBalancingPolicy = "weight"
+		}
 	}
 	return record, nil
 }

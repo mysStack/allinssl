@@ -23,7 +23,7 @@ describe('createDNSController', () => {
 		controller.zone.value = 'example.com'
 		await controller.refreshSession()
 		controller.openCreateRecordForm()
-		controller.recordForm.value = { name: 'www', type: 'A', ttl: 600, value: '192.0.2.1', line: 'default' }
+		controller.recordForm.value = { name: 'www', type: 'A', ttl: 600, value: '192.0.2.1', line: 'default', loadBalancingPolicy: 'round_robin', loadBalancingWeight: 1 }
 		await controller.saveRecord()
 		expect(createRecord).toHaveBeenCalledWith({ credentialID: 1, zone: 'example.com', record: controller.recordForm.value, csrfToken: 'csrf-a' })
 		expect(controller.snapshot.value).toEqual(createdSnapshot)
@@ -41,6 +41,14 @@ describe('createDNSController', () => {
 
 		controller.setRecordType('A')
 
-		expect(controller.recordForm.value).toEqual({ name: 'argo', type: 'A', ttl: 600, value: 'alb.example.com.', line: 'default' })
+		expect(controller.recordForm.value).toEqual({ name: 'argo', type: 'A', ttl: 600, value: 'alb.example.com.', line: 'default', loadBalancingPolicy: 'round_robin', loadBalancingWeight: 1 })
+	})
+
+	it('preserves the configured A record load-balancing policy when editing', () => {
+		const controller = createDNSController({ getCredentials: vi.fn(), getZones: vi.fn(), getSnapshot: vi.fn(), getSession: vi.fn(), createRecord: vi.fn(), updateRecord: vi.fn(), deleteRecord: vi.fn(), setRecordStatus: vi.fn() })
+		controller.openEditRecordForm({ provider_record_id: '1', name: 'api', type: 'A', ttl: 600, value: '192.0.2.10', line: 'default', status: 'ENABLE', protected: false, load_balancing_policy: 'weight', load_balancing_weight: 20 })
+
+		expect(controller.recordForm.value.loadBalancingPolicy).toBe('weight')
+		expect(controller.recordForm.value.loadBalancingWeight).toBe(20)
 	})
 })

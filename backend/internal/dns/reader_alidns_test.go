@@ -22,6 +22,8 @@ type fakeAPI struct {
 	update  func(context.Context, *alidns.UpdateDomainRecordRequest) (*alidns.UpdateDomainRecordResponse, error)
 	delete  func(context.Context, *alidns.DeleteDomainRecordRequest) (*alidns.DeleteDomainRecordResponse, error)
 	status  func(context.Context, *alidns.SetDomainRecordStatusRequest) (*alidns.SetDomainRecordStatusResponse, error)
+	lba     func(context.Context, *alidns.SetDNSSLBStatusRequest) (*alidns.SetDNSSLBStatusResponse, error)
+	lbaWeight func(context.Context, *alidns.UpdateDNSSLBWeightRequest) (*alidns.UpdateDNSSLBWeightResponse, error)
 }
 
 func (f fakeAPI) DomainInfo(c context.Context, q *alidns.DescribeDomainInfoRequest) (*alidns.DescribeDomainInfoResponse, error) {
@@ -47,6 +49,14 @@ func (f fakeAPI) DeleteRecord(c context.Context, q *alidns.DeleteDomainRecordReq
 }
 func (f fakeAPI) SetRecordStatus(c context.Context, q *alidns.SetDomainRecordStatusRequest) (*alidns.SetDomainRecordStatusResponse, error) {
 	return f.status(c, q)
+}
+func (f fakeAPI) SetDNSSLBStatus(c context.Context, q *alidns.SetDNSSLBStatusRequest) (*alidns.SetDNSSLBStatusResponse, error) {
+	if f.lba == nil { return &alidns.SetDNSSLBStatusResponse{}, nil }
+	return f.lba(c, q)
+}
+func (f fakeAPI) UpdateDNSSLBWeight(c context.Context, q *alidns.UpdateDNSSLBWeightRequest) (*alidns.UpdateDNSSLBWeightResponse, error) {
+	if f.lbaWeight == nil { return &alidns.UpdateDNSSLBWeightResponse{}, nil }
+	return f.lbaWeight(c, q)
 }
 func decode[T any](s string) *T {
 	var v T
@@ -278,5 +288,53 @@ func TestAliDNSRecordRequestsUseCanonicalProviderFields(t *testing.T) {
 	}
 	if *deleteRequest.RecordId != "record-1" || *status.RecordId != "record-1" || *status.Status != "Disable" {
 		t.Fatalf("delete/status = %#v/%#v", deleteRequest, status)
+	}
+}
+
+func TestAliDNSRecordTypeChangeUpdatesTheSameRecord(t *testing.T) {
+	var update *alidns.UpdateDomainRecordRequest
+	reader, err := NewAliDNSReader(fakeAPI{
+		update: func(_ context.Context, request *alidns.UpdateDomainRecordRequest) (*alidns.UpdateDomainRecordResponse, error) {
+			update = request
+			return &alidns.UpdateDomainRecordResponse{}, nil
+		},
+	}, ReaderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.UpdateRecord(context.Background(), "example.com", "record-cname", dnsmodel.Record{Name: "argo", Type: "A", TTL: 600, Value: "45.252.106.38", Line: "default"}); err != nil {
+		t.Fatal(err)
+	}
+	if update == nil || update.RecordId == nil || *update.RecordId != "record-cname" || update.Type == nil || *update.Type != "A" || update.Value == nil || *update.Value != "45.252.106.38" || update.Line == nil || *update.Line != "default" {
+		t.Fatalf("type change did not update the original record: %#v", update)
+	}
+}
+
+func TestAliDNSLoadBalancingUsesRecordSetPolicyAndRecordWeight(t *testing.T) {
+	weight := int64(20)
+	var status *alidns.SetDNSSLBStatusRequest
+	var updateWeight *alidns.UpdateDNSSLBWeightRequest
+	reader, err := NewAliDNSReader(fakeAPI{
+		lba: func(_ context.Context, request *alidns.SetDNSSLBStatusRequest) (*alidns.SetDNSSLBStatusResponse, error) { status = request; return &alidns.SetDNSSLBStatusResponse{}, nil },
+		lbaWeight: func(_ context.Context, request *alidns.UpdateDNSSLBWeightRequest) (*alidns.UpdateDNSSLBWeightResponse, error) { updateWeight = request; return &alidns.UpdateDNSSLBWeightResponse{}, nil },
+	}, ReaderOptions{})
+	if err != nil { t.Fatal(err) }
+	record := dnsmodel.Record{Name: "api", Type: "A", TTL: 600, Value: "192.0.2.10", Line: "default", LoadBalancingPolicy: "weight", LoadBalancingWeight: &weight}
+	if err := reader.SetRecordLoadBalancing(context.Background(), "example.com", "record-1", record); err != nil { t.Fatal(err) }
+	if status == nil || status.DomainName == nil || *status.DomainName != "example.com" || status.SubDomain == nil || *status.SubDomain != "api.example.com" || status.Type == nil || *status.Type != "A" || status.Line == nil || *status.Line != "default" || status.Open == nil || !*status.Open { t.Fatalf("status request = %#v", status) }
+	if updateWeight == nil || updateWeight.RecordId == nil || *updateWeight.RecordId != "record-1" || updateWeight.Weight == nil || *updateWeight.Weight != 20 { t.Fatalf("weight request = %#v", updateWeight) }
+}
+
+func TestReaderReturnsAliDNSLoadBalancingState(t *testing.T) {
+	f := fakeAPI{records: func(_ context.Context, request *alidns.DescribeDomainRecordsRequest) (*alidns.DescribeDomainRecordsResponse, error) {
+		return page(*request.PageNumber, 1, strings.ReplaceAll(strings.ReplaceAll(businessRecord, `"LbaStatus":false`, `"LbaStatus":true`), `"Weight":1`, `"Weight":20`)), nil
+	}}
+	snapshot, err := reader(t, f).ReadZone(context.Background(), "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, found := findRecord(snapshot, "r1")
+	if !found || !snapshot.Compatible || record.LoadBalancingPolicy != "weight" || record.LoadBalancingWeight == nil || *record.LoadBalancingWeight != 20 {
+		t.Fatalf("load-balancing snapshot = %#v", snapshot)
 	}
 }

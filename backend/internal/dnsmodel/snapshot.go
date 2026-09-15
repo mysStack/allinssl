@@ -27,6 +27,8 @@ type Record struct {
 	Port *int64 `json:"port,omitempty"`
 	CAAFlags *int64 `json:"caa_flags,omitempty"`
 	CAATag string `json:"caa_tag,omitempty"`
+	LoadBalancingPolicy string `json:"load_balancing_policy,omitempty"`
+	LoadBalancingWeight *int64 `json:"load_balancing_weight,omitempty"`
 	Line string `json:"line"`
 	Status string `json:"status"`
 	Metadata map[string]string `json:"metadata,omitempty"`
@@ -98,7 +100,7 @@ func protected(name,typ string) bool {
 
 func copyInt(n *int64) *int64 {if n==nil{return nil};v:=*n;return &v}
 func copyRecord(r Record) Record {
-	r.Priority=copyInt(r.Priority);r.Weight=copyInt(r.Weight);r.Port=copyInt(r.Port);r.CAAFlags=copyInt(r.CAAFlags)
+	r.Priority=copyInt(r.Priority);r.Weight=copyInt(r.Weight);r.Port=copyInt(r.Port);r.CAAFlags=copyInt(r.CAAFlags);r.LoadBalancingWeight=copyInt(r.LoadBalancingWeight)
 	if len(r.Metadata)>0 {m:=make(map[string]string,len(r.Metadata));for k,v:=range r.Metadata {m[k]=v};r.Metadata=m} else {r.Metadata=nil}
 	r.ReadOnlyReasons=nil
 	return r
@@ -114,6 +116,10 @@ func uint16Value(n *int64) bool {return n!=nil && *n>=0 && *n<=65535}
 
 func normalizeValue(r *Record) bool {
 	if (r.Priority!=nil && r.Type!="MX" && r.Type!="SRV") || ((r.Weight!=nil || r.Port!=nil) && r.Type!="SRV") || ((r.CAAFlags!=nil || r.CAATag!="") && r.Type!="CAA") {return false}
+	if r.LoadBalancingPolicy!="" && r.LoadBalancingPolicy!="round_robin" && r.LoadBalancingPolicy!="weight" {return false}
+	if (r.LoadBalancingPolicy!="" || r.LoadBalancingWeight!=nil) && r.Type!="A" && r.Type!="AAAA" {return false}
+	if r.LoadBalancingPolicy=="weight" && (r.LoadBalancingWeight==nil || *r.LoadBalancingWeight<1 || *r.LoadBalancingWeight>100) {return false}
+	if r.LoadBalancingPolicy=="round_robin" && r.LoadBalancingWeight!=nil {return false}
 	switch r.Type {
 	case "A","AAAA":
 		addr,err:=netip.ParseAddr(r.Value);if err!=nil || addr.Zone()!="" || (r.Type=="A" && !addr.Is4()) || (r.Type=="AAAA" && !addr.Is6()) {return false};r.Value=addr.String()
@@ -170,10 +176,10 @@ func BuildSnapshot(zone string, records []Record, limits Limits) (Snapshot,error
 			if r.TTL<max(int64(600),limits.MinTTL) || r.TTL>min(int64(86400),limits.MaxTTL) {issue("UNSUPPORTED_TTL")}
 			normalized:=copyRecord(r)
 			if !normalizeValue(&normalized) {issue("UNSUPPORTED_RECORD_VALUE")} else {
-				r.Value=normalized.Value;r.Priority=normalized.Priority;r.Weight=normalized.Weight;r.Port=normalized.Port;r.CAAFlags=normalized.CAAFlags;r.CAATag=normalized.CAATag
+				r.Value=normalized.Value;r.Priority=normalized.Priority;r.Weight=normalized.Weight;r.Port=normalized.Port;r.CAAFlags=normalized.CAAFlags;r.CAATag=normalized.CAATag;r.LoadBalancingPolicy=normalized.LoadBalancingPolicy;r.LoadBalancingWeight=normalized.LoadBalancingWeight
 			}
 			if r.Name=="@" && r.Type=="CNAME" {issue("APEX_CNAME")}
-			key:=r;key.ProviderRecordID="";key.ReadOnlyReasons=nil
+			key:=r;key.ProviderRecordID="";key.ReadOnlyReasons=nil;key.LoadBalancingPolicy="";key.LoadBalancingWeight=nil
 			if seen[jsonKey(key)] {issue("DUPLICATE_RECORD")};seen[jsonKey(key)]=true
 			if typesByName[r.Name]==nil {typesByName[r.Name]=map[string]int{}};typesByName[r.Name][r.Type]++
 			if r.Type=="MX" && r.Value=="." {nullMX[r.Name]=true}

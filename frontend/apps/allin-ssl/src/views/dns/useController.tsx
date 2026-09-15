@@ -24,7 +24,7 @@ export interface DNSGateway {
 	setRecordStatus: (input: { credentialID: number; zone: string; recordID: string; status: 'ENABLE' | 'DISABLE'; csrfToken: string }) => Promise<DNSSnapshot>
 }
 
-const emptyRecordForm = (): DNSRecordInput => ({ name: '', type: 'A', ttl: 600, value: '', line: 'default' })
+const emptyRecordForm = (): DNSRecordInput => ({ name: '', type: 'A', ttl: 600, value: '', line: 'default', loadBalancingPolicy: 'round_robin', loadBalancingWeight: 1 })
 
 export const createDNSController = (gateway: DNSGateway) => {
 	const credentials = ref<DNSCredential[]>([])
@@ -134,12 +134,14 @@ export const createDNSController = (gateway: DNSGateway) => {
 			port: record.port,
 			caaFlags: record.caa_flags,
 			caaTag: record.caa_tag,
+			loadBalancingPolicy: supportsLoadBalancing(record.type) ? record.load_balancing_policy ?? 'round_robin' : undefined,
+			loadBalancingWeight: supportsLoadBalancing(record.type) ? record.load_balancing_weight ?? 1 : undefined,
 		}
 		recordModalVisible.value = true
 	}
 
 	const setRecordType = (type: DNSRecordInput['type']) => {
-		recordForm.value = { name: recordForm.value.name, type, ttl: recordForm.value.ttl, value: recordForm.value.value, line: recordForm.value.line }
+		recordForm.value = { name: recordForm.value.name, type, ttl: recordForm.value.ttl, value: recordForm.value.value, line: recordForm.value.line, ...(supportsLoadBalancing(type) ? { loadBalancingPolicy: 'round_robin' as const, loadBalancingWeight: 1 } : {}) }
 	}
 
 	const saveRecord = async () => {
@@ -193,8 +195,11 @@ const validRecordForm = (record: DNSRecordInput) => {
 	if (record.type === 'MX') return record.priority !== undefined
 	if (record.type === 'SRV') return record.priority !== undefined && record.weight !== undefined && record.port !== undefined
 	if (record.type === 'CAA') return record.caaFlags !== undefined && Boolean(record.caaTag?.trim())
+	if (supportsLoadBalancing(record.type)) return (record.loadBalancingPolicy === 'round_robin' || record.loadBalancingPolicy === 'weight') && record.loadBalancingWeight !== undefined && record.loadBalancingWeight >= 1 && record.loadBalancingWeight <= 100
 	return true
 }
+
+const supportsLoadBalancing = (recordType: string) => recordType === 'A' || recordType === 'AAAA'
 
 const filterRecords = (records: DNSRecord[], filters: DNSRecordFilters, sort: { key: DNSRecordSortKey; order: DNSRecordSortOrder }): DNSRecord[] => {
 	const includes = (value: string, filter: string) => value.toLowerCase().includes(filter.trim().toLowerCase())

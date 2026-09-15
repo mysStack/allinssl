@@ -89,9 +89,9 @@ func TestDNSHandlerCreatesStrictRecordForm(t *testing.T) {
 	router := gin.New()
 	router.POST("/create_record", handler.CreateRecord)
 
-	form := url.Values{"credential_id": {"1"}, "zone": {"example.com"}, "name": {"api"}, "type": {"A"}, "ttl": {"600"}, "value": {"192.0.2.20"}, "line": {"default"}, "csrf_token": {"csrf-a"}}
+	form := url.Values{"credential_id": {"1"}, "zone": {"example.com"}, "name": {"api"}, "type": {"A"}, "ttl": {"600"}, "value": {"192.0.2.20"}, "line": {"default"}, "load_balancing_policy": {"weight"}, "load_balancing_weight": {"20"}, "csrf_token": {"csrf-a"}}
 	response := performDNSFormRequest(router, "/create_record", form)
-	if response.Code != http.StatusOK || service.create.Name != "api" || service.create.Line != "default" {
+	if response.Code != http.StatusOK || service.create.Name != "api" || service.create.Line != "default" || service.create.LoadBalancingPolicy != "weight" || service.create.LoadBalancingWeight == nil || *service.create.LoadBalancingWeight != 20 {
 		t.Fatalf("response/input = %d/%#v", response.Code, service.create)
 	}
 

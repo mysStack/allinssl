@@ -38,6 +38,7 @@ func (r fakeZoneReader) UpdateRecord(context.Context, string, string, dnsmodel.R
 }
 func (r fakeZoneReader) DeleteRecord(context.Context, string, string) error            { return nil }
 func (r fakeZoneReader) SetRecordStatus(context.Context, string, string, string) error { return nil }
+func (r fakeZoneReader) SetRecordLoadBalancing(context.Context, string, string, dnsmodel.Record) error { return nil }
 
 func (r fakeZoneReader) ListZones(context.Context) ([]ZoneSummary, error) {
 	return r.zones, nil

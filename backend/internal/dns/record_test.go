@@ -14,6 +14,7 @@ type fakeZoneManager struct {
 	updates   []recordUpdate
 	deletes   []string
 	statuses  []recordStatus
+	loadBalances []recordUpdate
 	addErr    error
 }
 
@@ -47,6 +48,11 @@ func (f *fakeZoneManager) SetRecordStatus(_ context.Context, _ string, recordID,
 	return nil
 }
 
+func (f *fakeZoneManager) SetRecordLoadBalancing(_ context.Context, _ string, recordID string, record dnsmodel.Record) error {
+	f.loadBalances = append(f.loadBalances, recordUpdate{id: recordID, record: record})
+	return nil
+}
+
 type recordUpdate struct {
 	id     string
 	record dnsmodel.Record
@@ -63,15 +69,18 @@ func TestServiceCreateRecordNormalizesThenRefreshesZone(t *testing.T) {
 		dnsmodel.Record{ProviderRecordID: "1", Name: "www", Type: "A", TTL: 600, Value: "192.0.2.10", Line: "default", Status: "ENABLE"},
 		dnsmodel.Record{ProviderRecordID: "2", Name: "api", Type: "A", TTL: 600, Value: "192.0.2.20", Line: "default", Status: "ENABLE"},
 	)
-	manager := &fakeZoneManager{snapshots: []dnsmodel.Snapshot{before, after}}
+	manager := &fakeZoneManager{snapshots: []dnsmodel.Snapshot{before, after, after}}
 	service := NewService(fakeCredentialStore{credential: Credential{accessKeyID: "id", accessKeySecret: "secret"}}, &fakeReaderFactory{reader: manager})
 
 	snapshot, err := service.CreateRecord(context.Background(), 1, "example.com", RecordInput{Name: "API", Type: "a", TTL: 600, Value: "192.0.2.20", Line: "default"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(manager.add) != 1 || manager.add[0].Name != "api" || manager.add[0].Type != "A" || manager.add[0].Value != "192.0.2.20" {
+	if len(manager.add) != 1 || manager.add[0].Name != "api" || manager.add[0].Type != "A" || manager.add[0].Value != "192.0.2.20" || manager.add[0].LoadBalancingPolicy != "round_robin" {
 		t.Fatalf("add requests = %#v", manager.add)
+	}
+	if len(manager.loadBalances) != 1 || manager.loadBalances[0].id != "2" || manager.loadBalances[0].record.LoadBalancingPolicy != "round_robin" {
+		t.Fatalf("load-balancing requests = %#v", manager.loadBalances)
 	}
 	if len(snapshot.Records) != 2 || len(manager.snapshots) != 0 {
 		t.Fatalf("snapshot records = %d, remaining reads = %d", len(snapshot.Records), len(manager.snapshots))
@@ -129,7 +138,7 @@ func TestServiceAllowsWritesWhenOtherRecordsUseSpecialLinesOrAreDisabled(t *test
 		dnsmodel.Record{ProviderRecordID: "legacy", Name: "legacy", Type: "A", TTL: 600, Value: "192.0.2.10", Line: "telecom", Status: "DISABLE", Metadata: map[string]string{"remark": "keep"}},
 		dnsmodel.Record{ProviderRecordID: "api", Name: "api", Type: "A", TTL: 600, Value: "192.0.2.20", Line: "default", Status: "ENABLE"},
 	)
-	manager := &fakeZoneManager{snapshots: []dnsmodel.Snapshot{before, after}}
+	manager := &fakeZoneManager{snapshots: []dnsmodel.Snapshot{before, after, after}}
 	service := NewService(fakeCredentialStore{credential: Credential{accessKeyID: "id", accessKeySecret: "secret"}}, &fakeReaderFactory{reader: manager})
 
 	if _, err := service.CreateRecord(context.Background(), 1, "example.com", RecordInput{Name: "api", Type: "A", TTL: 600, Value: "192.0.2.20", Line: "default"}); err != nil {
@@ -157,6 +166,21 @@ func TestServiceRejectsWhitespaceOnlyLine(t *testing.T) {
 
 	if _, err := service.CreateRecord(context.Background(), 1, "example.com", RecordInput{Name: "api", Type: "A", TTL: 600, Value: "192.0.2.20", Line: "  "}); !errors.Is(err, ErrInvalidRecord) {
 		t.Fatalf("whitespace line err = %v", err)
+	}
+}
+
+func TestServiceAppliesARecordLoadBalancingPolicy(t *testing.T) {
+	weight := int64(20)
+	before := testRecordSnapshot(t, dnsmodel.Record{ProviderRecordID: "1", Name: "api", Type: "A", TTL: 600, Value: "192.0.2.10", Line: "default", Status: "ENABLE"})
+	after := testRecordSnapshot(t, dnsmodel.Record{ProviderRecordID: "1", Name: "api", Type: "A", TTL: 600, Value: "192.0.2.10", Line: "default", Status: "ENABLE", LoadBalancingPolicy: "weight", LoadBalancingWeight: &weight})
+	manager := &fakeZoneManager{snapshots: []dnsmodel.Snapshot{before, after}}
+	service := NewService(fakeCredentialStore{credential: Credential{accessKeyID: "id", accessKeySecret: "secret"}}, &fakeReaderFactory{reader: manager})
+
+	if _, err := service.UpdateRecord(context.Background(), 1, "example.com", "1", RecordInput{Name: "api", Type: "A", TTL: 600, Value: "192.0.2.10", Line: "default", LoadBalancingPolicy: "weight", LoadBalancingWeight: &weight}); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.loadBalances) != 1 || manager.loadBalances[0].id != "1" || manager.loadBalances[0].record.LoadBalancingPolicy != "weight" || manager.loadBalances[0].record.LoadBalancingWeight == nil || *manager.loadBalances[0].record.LoadBalancingWeight != 20 {
+		t.Fatalf("load-balancing requests = %#v", manager.loadBalances)
 	}
 }
 

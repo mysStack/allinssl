@@ -222,7 +222,10 @@ func recordForm(c *gin.Context, requiresID bool) (dnsRecordForm, bool) {
 		allowed["record_id"] = true
 	}
 	switch recordType {
-	case "A", "AAAA", "CNAME", "TXT":
+	case "A", "AAAA":
+		allowed["load_balancing_policy"] = true
+		allowed["load_balancing_weight"] = true
+	case "CNAME", "TXT":
 	case "MX":
 		allowed["priority"] = true
 	case "SRV":
@@ -245,6 +248,11 @@ func recordForm(c *gin.Context, requiresID bool) (dnsRecordForm, bool) {
 	form := dnsRecordForm{credentialID: credentialID, zone: strings.TrimSpace(c.PostForm("zone")), recordID: strings.TrimSpace(c.PostForm("record_id")), record: dns.RecordInput{Name: strings.TrimSpace(c.PostForm("name")), Type: recordType, TTL: ttl, Value: c.PostForm("value"), Line: strings.TrimSpace(c.PostForm("line"))}}
 	valid := credentialOK && ttlOK && form.zone != "" && form.record.Name != "" && form.record.Value != "" && form.record.Line != "" && c.PostForm("csrf_token") != "" && (!requiresID || form.recordID != "")
 	switch recordType {
+	case "A", "AAAA":
+		form.record.LoadBalancingPolicy = c.PostForm("load_balancing_policy")
+		weight, ok := strictDecimal(c.PostForm("load_balancing_weight"), 1, 100)
+		form.record.LoadBalancingWeight = &weight
+		valid = valid && ok && (form.record.LoadBalancingPolicy == "round_robin" || form.record.LoadBalancingPolicy == "weight")
 	case "MX":
 		value, ok := strictDecimal(c.PostForm("priority"), 0, 65535)
 		form.record.Priority = &value
