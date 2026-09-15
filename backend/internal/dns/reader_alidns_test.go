@@ -15,15 +15,16 @@ import (
 
 // Fixtures replace only the cloud boundary, not normalization or pagination.
 type fakeAPI struct {
-	info    func(context.Context, *alidns.DescribeDomainInfoRequest) (*alidns.DescribeDomainInfoResponse, error)
-	records func(context.Context, *alidns.DescribeDomainRecordsRequest) (*alidns.DescribeDomainRecordsResponse, error)
-	zones   func(context.Context, *alidns.DescribeDomainsRequest) (*alidns.DescribeDomainsResponse, error)
-	add     func(context.Context, *alidns.AddDomainRecordRequest) (*alidns.AddDomainRecordResponse, error)
-	update  func(context.Context, *alidns.UpdateDomainRecordRequest) (*alidns.UpdateDomainRecordResponse, error)
-	delete  func(context.Context, *alidns.DeleteDomainRecordRequest) (*alidns.DeleteDomainRecordResponse, error)
-	status  func(context.Context, *alidns.SetDomainRecordStatusRequest) (*alidns.SetDomainRecordStatusResponse, error)
-	lba     func(context.Context, *alidns.SetDNSSLBStatusRequest) (*alidns.SetDNSSLBStatusResponse, error)
+	info      func(context.Context, *alidns.DescribeDomainInfoRequest) (*alidns.DescribeDomainInfoResponse, error)
+	records   func(context.Context, *alidns.DescribeDomainRecordsRequest) (*alidns.DescribeDomainRecordsResponse, error)
+	zones     func(context.Context, *alidns.DescribeDomainsRequest) (*alidns.DescribeDomainsResponse, error)
+	add       func(context.Context, *alidns.AddDomainRecordRequest) (*alidns.AddDomainRecordResponse, error)
+	update    func(context.Context, *alidns.UpdateDomainRecordRequest) (*alidns.UpdateDomainRecordResponse, error)
+	delete    func(context.Context, *alidns.DeleteDomainRecordRequest) (*alidns.DeleteDomainRecordResponse, error)
+	status    func(context.Context, *alidns.SetDomainRecordStatusRequest) (*alidns.SetDomainRecordStatusResponse, error)
+	lba       func(context.Context, *alidns.SetDNSSLBStatusRequest) (*alidns.SetDNSSLBStatusResponse, error)
 	lbaWeight func(context.Context, *alidns.UpdateDNSSLBWeightRequest) (*alidns.UpdateDNSSLBWeightResponse, error)
+	remark    func(context.Context, *alidns.UpdateDomainRecordRemarkRequest) (*alidns.UpdateDomainRecordRemarkResponse, error)
 }
 
 func (f fakeAPI) DomainInfo(c context.Context, q *alidns.DescribeDomainInfoRequest) (*alidns.DescribeDomainInfoResponse, error) {
@@ -51,12 +52,22 @@ func (f fakeAPI) SetRecordStatus(c context.Context, q *alidns.SetDomainRecordSta
 	return f.status(c, q)
 }
 func (f fakeAPI) SetDNSSLBStatus(c context.Context, q *alidns.SetDNSSLBStatusRequest) (*alidns.SetDNSSLBStatusResponse, error) {
-	if f.lba == nil { return &alidns.SetDNSSLBStatusResponse{}, nil }
+	if f.lba == nil {
+		return &alidns.SetDNSSLBStatusResponse{}, nil
+	}
 	return f.lba(c, q)
 }
 func (f fakeAPI) UpdateDNSSLBWeight(c context.Context, q *alidns.UpdateDNSSLBWeightRequest) (*alidns.UpdateDNSSLBWeightResponse, error) {
-	if f.lbaWeight == nil { return &alidns.UpdateDNSSLBWeightResponse{}, nil }
+	if f.lbaWeight == nil {
+		return &alidns.UpdateDNSSLBWeightResponse{}, nil
+	}
 	return f.lbaWeight(c, q)
+}
+func (f fakeAPI) UpdateRecordRemark(c context.Context, q *alidns.UpdateDomainRecordRemarkRequest) (*alidns.UpdateDomainRecordRemarkResponse, error) {
+	if f.remark == nil {
+		return &alidns.UpdateDomainRecordRemarkResponse{}, nil
+	}
+	return f.remark(c, q)
 }
 func decode[T any](s string) *T {
 	var v T
@@ -115,7 +126,7 @@ func TestReaderFullPaginationKeepsUnsupportedRecords(t *testing.T) {
 		t.Fatalf("partial or unsafe snapshot: calls=%d records=%d compatible=%v", calls, len(s.Records), s.Compatible)
 	}
 	for _, r := range s.Records {
-		if r.Name == "legacy" && (r.Status != "DISABLE" || r.Line != "telecom" || r.Metadata["remark"] != "keep me") {
+		if r.Name == "legacy" && (r.Status != "DISABLE" || r.Line != "telecom" || r.Remark != "keep me") {
 			t.Fatal("lost provider attributes")
 		}
 	}
@@ -315,14 +326,28 @@ func TestAliDNSLoadBalancingUsesRecordSetPolicyAndRecordWeight(t *testing.T) {
 	var status *alidns.SetDNSSLBStatusRequest
 	var updateWeight *alidns.UpdateDNSSLBWeightRequest
 	reader, err := NewAliDNSReader(fakeAPI{
-		lba: func(_ context.Context, request *alidns.SetDNSSLBStatusRequest) (*alidns.SetDNSSLBStatusResponse, error) { status = request; return &alidns.SetDNSSLBStatusResponse{}, nil },
-		lbaWeight: func(_ context.Context, request *alidns.UpdateDNSSLBWeightRequest) (*alidns.UpdateDNSSLBWeightResponse, error) { updateWeight = request; return &alidns.UpdateDNSSLBWeightResponse{}, nil },
+		lba: func(_ context.Context, request *alidns.SetDNSSLBStatusRequest) (*alidns.SetDNSSLBStatusResponse, error) {
+			status = request
+			return &alidns.SetDNSSLBStatusResponse{}, nil
+		},
+		lbaWeight: func(_ context.Context, request *alidns.UpdateDNSSLBWeightRequest) (*alidns.UpdateDNSSLBWeightResponse, error) {
+			updateWeight = request
+			return &alidns.UpdateDNSSLBWeightResponse{}, nil
+		},
 	}, ReaderOptions{})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	record := dnsmodel.Record{Name: "api", Type: "A", TTL: 600, Value: "192.0.2.10", Line: "default", LoadBalancingPolicy: "weight", LoadBalancingWeight: &weight}
-	if err := reader.SetRecordLoadBalancing(context.Background(), "example.com", "record-1", record); err != nil { t.Fatal(err) }
-	if status == nil || status.DomainName == nil || *status.DomainName != "example.com" || status.SubDomain == nil || *status.SubDomain != "api.example.com" || status.Type == nil || *status.Type != "A" || status.Line == nil || *status.Line != "default" || status.Open == nil || !*status.Open { t.Fatalf("status request = %#v", status) }
-	if updateWeight == nil || updateWeight.RecordId == nil || *updateWeight.RecordId != "record-1" || updateWeight.Weight == nil || *updateWeight.Weight != 20 { t.Fatalf("weight request = %#v", updateWeight) }
+	if err := reader.SetRecordLoadBalancing(context.Background(), "example.com", "record-1", record); err != nil {
+		t.Fatal(err)
+	}
+	if status == nil || status.DomainName == nil || *status.DomainName != "example.com" || status.SubDomain == nil || *status.SubDomain != "api.example.com" || status.Type == nil || *status.Type != "A" || status.Line == nil || *status.Line != "default" || status.Open == nil || !*status.Open {
+		t.Fatalf("status request = %#v", status)
+	}
+	if updateWeight == nil || updateWeight.RecordId == nil || *updateWeight.RecordId != "record-1" || updateWeight.Weight == nil || *updateWeight.Weight != 20 {
+		t.Fatalf("weight request = %#v", updateWeight)
+	}
 }
 
 func TestReaderReturnsAliDNSLoadBalancingState(t *testing.T) {
@@ -336,5 +361,38 @@ func TestReaderReturnsAliDNSLoadBalancingState(t *testing.T) {
 	record, found := findRecord(snapshot, "r1")
 	if !found || !snapshot.Compatible || record.LoadBalancingPolicy != "weight" || record.LoadBalancingWeight == nil || *record.LoadBalancingWeight != 20 {
 		t.Fatalf("load-balancing snapshot = %#v", snapshot)
+	}
+}
+
+func TestReaderDisplaysCNAMELoadBalancingStateWithoutMetadataFallback(t *testing.T) {
+	f := fakeAPI{records: func(_ context.Context, request *alidns.DescribeDomainRecordsRequest) (*alidns.DescribeDomainRecordsResponse, error) {
+		record := strings.ReplaceAll(businessRecord, `"Type":"A"`, `"Type":"CNAME"`)
+		record = strings.ReplaceAll(record, `"Value":"192.0.2.10"`, `"Value":"target.example.net."`)
+		record = strings.ReplaceAll(record, `"LbaStatus":false`, `"LbaStatus":true`)
+		record = strings.ReplaceAll(record, `"Weight":1`, `"Weight":20`)
+		return page(*request.PageNumber, 1, record), nil
+	}}
+
+	snapshot, err := reader(t, f).ReadZone(context.Background(), "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Compatible || snapshot.Records[1].LoadBalancingPolicy != "weight" || snapshot.Records[1].LoadBalancingWeight == nil || *snapshot.Records[1].LoadBalancingWeight != 20 {
+		t.Fatalf("CNAME DNSLB state = %#v", snapshot)
+	}
+}
+
+func TestReaderKeepsRemarkAsManagedRecordData(t *testing.T) {
+	f := fakeAPI{records: func(_ context.Context, request *alidns.DescribeDomainRecordsRequest) (*alidns.DescribeDomainRecordsResponse, error) {
+		record := strings.Replace(businessRecord, `"Weight":1`, `"Weight":1,"Remark":"入口服务"`, 1)
+		return page(*request.PageNumber, 1, record), nil
+	}}
+
+	snapshot, err := reader(t, f).ReadZone(context.Background(), "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Compatible || len(snapshot.Records) != 2 || snapshot.Records[1].Remark != "入口服务" {
+		t.Fatalf("remark was not retained as managed data: %#v", snapshot)
 	}
 }

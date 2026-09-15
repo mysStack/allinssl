@@ -37,6 +37,7 @@ type aliDNSWriter interface {
 	SetRecordStatus(context.Context, *alidns.SetDomainRecordStatusRequest) (*alidns.SetDomainRecordStatusResponse, error)
 	SetDNSSLBStatus(context.Context, *alidns.SetDNSSLBStatusRequest) (*alidns.SetDNSSLBStatusResponse, error)
 	UpdateDNSSLBWeight(context.Context, *alidns.UpdateDNSSLBWeightRequest) (*alidns.UpdateDNSSLBWeightResponse, error)
+	UpdateRecordRemark(context.Context, *alidns.UpdateDomainRecordRemarkRequest) (*alidns.UpdateDomainRecordRemarkResponse, error)
 }
 
 type ReaderOptions struct {
@@ -257,6 +258,17 @@ func (r *AliDNSReader) SetRecordLoadBalancing(ctx context.Context, zone, recordI
 	return nil
 }
 
+func (r *AliDNSReader) SetRecordRemark(ctx context.Context, recordID, remark string) error {
+	writer, ok := r.api.(aliDNSWriter)
+	if r == nil || !ok || ctx == nil || recordID == "" {
+		return ErrWriteFailed
+	}
+	if _, err := writer.UpdateRecordRemark(ctx, &alidns.UpdateDomainRecordRemarkRequest{RecordId: &recordID, Remark: &remark}); err != nil {
+		return writeError(ctx)
+	}
+	return nil
+}
+
 func (r *AliDNSReader) readZoneOnce(ctx context.Context, zone string) (dnsmodel.Snapshot, error) {
 	zoneInfo, err := r.api.DomainInfo(ctx, &alidns.DescribeDomainInfoRequest{
 		DomainName:           &zone,
@@ -368,19 +380,19 @@ func convertRecord(zone string, source *alidns.DescribeDomainRecordsResponseBody
 		weight := int64(*source.Weight)
 		if record.Type == "SRV" {
 			record.Weight = &weight
-		} else if (record.Type == "A" || record.Type == "AAAA") && source.LbaStatus != nil && *source.LbaStatus {
+		} else if (record.Type == "A" || record.Type == "AAAA" || record.Type == "CNAME") && source.LbaStatus != nil && *source.LbaStatus {
 			record.LoadBalancingWeight = &weight
 		} else if weight != 1 {
 			setMetadata(&record, "weight", fmt.Sprint(weight))
 		}
 	}
-	if source.Remark != nil && *source.Remark != "" {
-		setMetadata(&record, "remark", *source.Remark)
+	if source.Remark != nil {
+		record.Remark = *source.Remark
 	}
 	if source.Locked != nil && *source.Locked {
 		setMetadata(&record, "locked", "true")
 	}
-	if record.Type == "A" || record.Type == "AAAA" {
+	if record.Type == "A" || record.Type == "AAAA" || record.Type == "CNAME" {
 		record.LoadBalancingPolicy = "round_robin"
 		if source.LbaStatus != nil && *source.LbaStatus {
 			record.LoadBalancingPolicy = "weight"

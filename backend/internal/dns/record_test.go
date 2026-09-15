@@ -9,13 +9,13 @@ import (
 )
 
 type fakeZoneManager struct {
-	snapshots []dnsmodel.Snapshot
-	add       []dnsmodel.Record
-	updates   []recordUpdate
-	deletes   []string
-	statuses  []recordStatus
+	snapshots    []dnsmodel.Snapshot
+	add          []dnsmodel.Record
+	updates      []recordUpdate
+	deletes      []string
+	statuses     []recordStatus
 	loadBalances []recordUpdate
-	addErr    error
+	addErr       error
 }
 
 func (f *fakeZoneManager) ListZones(context.Context) ([]ZoneSummary, error) {
@@ -52,6 +52,8 @@ func (f *fakeZoneManager) SetRecordLoadBalancing(_ context.Context, _ string, re
 	f.loadBalances = append(f.loadBalances, recordUpdate{id: recordID, record: record})
 	return nil
 }
+
+func (f *fakeZoneManager) SetRecordRemark(_ context.Context, _ string, _ string) error { return nil }
 
 type recordUpdate struct {
 	id     string

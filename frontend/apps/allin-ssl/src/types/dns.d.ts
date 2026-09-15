@@ -26,6 +26,7 @@ export interface DNSRecord {
 	port?: number
 	caa_flags?: number
 	caa_tag?: string
+	remark?: string
 	load_balancing_policy?: 'round_robin' | 'weight'
 	load_balancing_weight?: number
 }
@@ -54,8 +55,23 @@ export interface DNSRecordInput {
 	port?: number
 	caaFlags?: number
 	caaTag?: string
+	remark?: string
 	loadBalancingPolicy?: 'round_robin' | 'weight'
 	loadBalancingWeight?: number
+}
+
+export interface DNSRecordSetValue extends DNSRecordInput {
+	recordID?: string
+	status: 'ENABLE' | 'DISABLE'
+}
+
+export interface DNSRecordSetInput {
+	name: string
+	type: DNSRecordType
+	ttl: number
+	line: string
+	loadBalancingPolicy?: 'round_robin' | 'weight'
+	values: DNSRecordSetValue[]
 }
 
 export interface DNSRecordMutationInput {

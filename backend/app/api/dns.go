@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"ALLinSSL/backend/internal/dns"
 	"ALLinSSL/backend/internal/dnsmodel"
@@ -217,7 +218,7 @@ func recordForm(c *gin.Context, requiresID bool) (dnsRecordForm, bool) {
 		return dnsRecordForm{}, false
 	}
 	recordType := strings.ToUpper(strings.TrimSpace(c.PostForm("type")))
-	allowed := map[string]bool{"credential_id": true, "zone": true, "name": true, "type": true, "ttl": true, "value": true, "line": true, "csrf_token": true}
+	allowed := map[string]bool{"credential_id": true, "zone": true, "name": true, "type": true, "ttl": true, "value": true, "line": true, "remark": true, "csrf_token": true}
 	if requiresID {
 		allowed["record_id"] = true
 	}
@@ -239,14 +240,18 @@ func recordForm(c *gin.Context, requiresID bool) (dnsRecordForm, bool) {
 		public.FailMsg(c, message)
 		return dnsRecordForm{}, false
 	}
+	if _, ok := c.Request.PostForm["remark"]; !ok {
+		c.Request.PostForm["remark"] = []string{""}
+	}
 	if !strictDNSForm(c.Request.PostForm, allowed) {
 		public.FailMsg(c, message)
 		return dnsRecordForm{}, false
 	}
 	credentialID, credentialOK := strictDecimal(c.PostForm("credential_id"), 1, int64(^uint64(0)>>1))
 	ttl, ttlOK := strictDecimal(c.PostForm("ttl"), 600, 86400)
-	form := dnsRecordForm{credentialID: credentialID, zone: strings.TrimSpace(c.PostForm("zone")), recordID: strings.TrimSpace(c.PostForm("record_id")), record: dns.RecordInput{Name: strings.TrimSpace(c.PostForm("name")), Type: recordType, TTL: ttl, Value: c.PostForm("value"), Line: strings.TrimSpace(c.PostForm("line"))}}
-	valid := credentialOK && ttlOK && form.zone != "" && form.record.Name != "" && form.record.Value != "" && form.record.Line != "" && c.PostForm("csrf_token") != "" && (!requiresID || form.recordID != "")
+	remark := strings.TrimSpace(c.PostForm("remark"))
+	form := dnsRecordForm{credentialID: credentialID, zone: strings.TrimSpace(c.PostForm("zone")), recordID: strings.TrimSpace(c.PostForm("record_id")), record: dns.RecordInput{Name: strings.TrimSpace(c.PostForm("name")), Type: recordType, TTL: ttl, Value: c.PostForm("value"), Line: strings.TrimSpace(c.PostForm("line")), Remark: remark}}
+	valid := credentialOK && ttlOK && utf8.RuneCountInString(remark) <= 50 && form.zone != "" && form.record.Name != "" && form.record.Value != "" && form.record.Line != "" && c.PostForm("csrf_token") != "" && (!requiresID || form.recordID != "")
 	switch recordType {
 	case "A", "AAAA":
 		form.record.LoadBalancingPolicy = c.PostForm("load_balancing_policy")

@@ -27,6 +27,7 @@ type Record struct {
 	Port *int64 `json:"port,omitempty"`
 	CAAFlags *int64 `json:"caa_flags,omitempty"`
 	CAATag string `json:"caa_tag,omitempty"`
+	Remark string `json:"remark,omitempty"`
 	LoadBalancingPolicy string `json:"load_balancing_policy,omitempty"`
 	LoadBalancingWeight *int64 `json:"load_balancing_weight,omitempty"`
 	Line string `json:"line"`
@@ -116,8 +117,9 @@ func uint16Value(n *int64) bool {return n!=nil && *n>=0 && *n<=65535}
 
 func normalizeValue(r *Record) bool {
 	if (r.Priority!=nil && r.Type!="MX" && r.Type!="SRV") || ((r.Weight!=nil || r.Port!=nil) && r.Type!="SRV") || ((r.CAAFlags!=nil || r.CAATag!="") && r.Type!="CAA") {return false}
+	if utf8.RuneCountInString(r.Remark)>50 {return false}
 	if r.LoadBalancingPolicy!="" && r.LoadBalancingPolicy!="round_robin" && r.LoadBalancingPolicy!="weight" {return false}
-	if (r.LoadBalancingPolicy!="" || r.LoadBalancingWeight!=nil) && r.Type!="A" && r.Type!="AAAA" {return false}
+	if (r.LoadBalancingPolicy!="" || r.LoadBalancingWeight!=nil) && r.Type!="A" && r.Type!="AAAA" && r.Type!="CNAME" {return false}
 	if r.LoadBalancingPolicy=="weight" && (r.LoadBalancingWeight==nil || *r.LoadBalancingWeight<1 || *r.LoadBalancingWeight>100) {return false}
 	if r.LoadBalancingPolicy=="round_robin" && r.LoadBalancingWeight!=nil {return false}
 	switch r.Type {
@@ -176,7 +178,7 @@ func BuildSnapshot(zone string, records []Record, limits Limits) (Snapshot,error
 			if r.TTL<max(int64(600),limits.MinTTL) || r.TTL>min(int64(86400),limits.MaxTTL) {issue("UNSUPPORTED_TTL")}
 			normalized:=copyRecord(r)
 			if !normalizeValue(&normalized) {issue("UNSUPPORTED_RECORD_VALUE")} else {
-				r.Value=normalized.Value;r.Priority=normalized.Priority;r.Weight=normalized.Weight;r.Port=normalized.Port;r.CAAFlags=normalized.CAAFlags;r.CAATag=normalized.CAATag;r.LoadBalancingPolicy=normalized.LoadBalancingPolicy;r.LoadBalancingWeight=normalized.LoadBalancingWeight
+				r.Value=normalized.Value;r.Priority=normalized.Priority;r.Weight=normalized.Weight;r.Port=normalized.Port;r.CAAFlags=normalized.CAAFlags;r.CAATag=normalized.CAATag;r.Remark=normalized.Remark;r.LoadBalancingPolicy=normalized.LoadBalancingPolicy;r.LoadBalancingWeight=normalized.LoadBalancingWeight
 			}
 			if r.Name=="@" && r.Type=="CNAME" {issue("APEX_CNAME")}
 			key:=r;key.ProviderRecordID="";key.ReadOnlyReasons=nil;key.LoadBalancingPolicy="";key.LoadBalancingWeight=nil

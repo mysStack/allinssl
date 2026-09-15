@@ -29,5 +29,5 @@ export const setDNSRecordStatus = async (input: DNSRecordMutationInput & { recor
 const recordPayload = (input: DNSRecordMutationInput & { record: DNSRecordInput }) => {
 	const record = input.record
 	const specificFields = record.type === 'A' || record.type === 'AAAA' ? { load_balancing_policy: record.loadBalancingPolicy, load_balancing_weight: record.loadBalancingWeight } : record.type === 'MX' ? { priority: record.priority } : record.type === 'SRV' ? { priority: record.priority, weight: record.weight, port: record.port } : record.type === 'CAA' ? { caa_flags: record.caaFlags, caa_tag: record.caaTag } : {}
-	return { credential_id: input.credentialID, zone: input.zone, name: record.name, type: record.type, ttl: record.ttl, value: record.value, line: record.line, ...specificFields, csrf_token: input.csrfToken }
+	return { credential_id: input.credentialID, zone: input.zone, name: record.name, type: record.type, ttl: record.ttl, value: record.value, line: record.line, remark: record.remark ?? '', ...specificFields, csrf_token: input.csrfToken }
 }

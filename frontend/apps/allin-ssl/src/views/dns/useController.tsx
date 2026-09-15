@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 
-import type { DNSCredential, DNSRecord, DNSRecordInput, DNSSession, DNSSnapshot, DNSZone } from '@/types/dns'
+import type { DNSCredential, DNSRecord, DNSRecordInput, DNSRecordSetInput, DNSRecordSetValue, DNSSession, DNSSnapshot, DNSZone } from '@/types/dns'
 
 export interface DNSRecordFilters {
 	name: string
@@ -24,7 +24,8 @@ export interface DNSGateway {
 	setRecordStatus: (input: { credentialID: number; zone: string; recordID: string; status: 'ENABLE' | 'DISABLE'; csrfToken: string }) => Promise<DNSSnapshot>
 }
 
-const emptyRecordForm = (): DNSRecordInput => ({ name: '', type: 'A', ttl: 600, value: '', line: 'default', loadBalancingPolicy: 'round_robin', loadBalancingWeight: 1 })
+const emptyRecordValue = (): DNSRecordSetValue => ({ type: 'A', name: '', ttl: 600, value: '', line: 'default', remark: '', loadBalancingWeight: 1, status: 'ENABLE' })
+const emptyRecordForm = (): DNSRecordSetInput => ({ name: '', type: 'A', ttl: 600, line: 'default', loadBalancingPolicy: 'round_robin', values: [emptyRecordValue()] })
 
 export const createDNSController = (gateway: DNSGateway) => {
 	const credentials = ref<DNSCredential[]>([])
@@ -38,7 +39,9 @@ export const createDNSController = (gateway: DNSGateway) => {
 	const csrfToken = ref('')
 	const recordModalVisible = ref(false)
 	const editingRecordID = ref<string | null>(null)
-	const recordForm = ref<DNSRecordInput>(emptyRecordForm())
+	const recordForm = ref<DNSRecordSetInput>(emptyRecordForm())
+	const removedRecordIDs = ref<string[]>([])
+	const originalStatuses = ref<Record<string, 'ENABLE' | 'DISABLE'>>({})
 	const recordFilters = ref<DNSRecordFilters>({ name: '', type: '', line: '', status: '', value: '' })
 	const recordSort = ref<{ key: DNSRecordSortKey; order: DNSRecordSortOrder }>({ key: 'provider_record_id', order: 'descend' })
 	const credentialOptions = computed(() => credentials.value.map((item) => ({ label: item.name, value: item.id })))
@@ -115,6 +118,8 @@ export const createDNSController = (gateway: DNSGateway) => {
 	const openCreateRecordForm = () => {
 		error.value = ''
 		editingRecordID.value = null
+		removedRecordIDs.value = []
+		originalStatuses.value = {}
 		recordForm.value = emptyRecordForm()
 		recordModalVisible.value = true
 	}
@@ -122,31 +127,42 @@ export const createDNSController = (gateway: DNSGateway) => {
 	const openEditRecordForm = (record: DNSRecord) => {
 		if (!canManageRecord(record)) return
 		error.value = ''
+		const records = (snapshot.value?.records ?? [record]).filter((item) => item.name === record.name && item.type === record.type && item.line === record.line && canManageRecord(item))
 		editingRecordID.value = record.provider_record_id
+		removedRecordIDs.value = []
+		originalStatuses.value = Object.fromEntries(records.map((item) => [item.provider_record_id, item.status as 'ENABLE' | 'DISABLE']))
 		recordForm.value = {
 			name: record.name,
 			type: record.type as DNSRecordInput['type'],
 			ttl: record.ttl,
-			value: record.value,
 			line: record.line,
-			priority: record.priority,
-			weight: record.weight,
-			port: record.port,
-			caaFlags: record.caa_flags,
-			caaTag: record.caa_tag,
 			loadBalancingPolicy: supportsLoadBalancing(record.type) ? record.load_balancing_policy ?? 'round_robin' : undefined,
-			loadBalancingWeight: supportsLoadBalancing(record.type) ? record.load_balancing_weight ?? 1 : undefined,
+			values: records.map((item) => recordValue(item)),
 		}
 		recordModalVisible.value = true
 	}
 
 	const setRecordType = (type: DNSRecordInput['type']) => {
-		recordForm.value = { name: recordForm.value.name, type, ttl: recordForm.value.ttl, value: recordForm.value.value, line: recordForm.value.line, ...(supportsLoadBalancing(type) ? { loadBalancingPolicy: 'round_robin' as const, loadBalancingWeight: 1 } : {}) }
+		if (editingRecordID.value && recordForm.value.values.length > 1) return
+		recordForm.value.type = type
+		recordForm.value.loadBalancingPolicy = supportsLoadBalancing(type) ? 'round_robin' : undefined
+		recordForm.value.values = recordForm.value.values.map((value) => ({ ...value, type, priority: undefined, weight: undefined, port: undefined, caaFlags: undefined, caaTag: undefined, loadBalancingWeight: supportsLoadBalancing(type) ? 1 : undefined }))
+	}
+
+	const addRecordValue = () => {
+		const type = recordForm.value.type
+		recordForm.value.values.push({ ...emptyRecordValue(), type, name: recordForm.value.name, ttl: recordForm.value.ttl, line: recordForm.value.line, loadBalancingWeight: supportsLoadBalancing(type) ? 1 : undefined })
+	}
+
+	const removeRecordValue = (index: number) => {
+		if (recordForm.value.values.length === 1) return
+		const [removed] = recordForm.value.values.splice(index, 1)
+		if (removed.recordID) removedRecordIDs.value.push(removed.recordID)
 	}
 
 	const saveRecord = async () => {
-		if (!credentialID.value || !zone.value || !validRecordForm(recordForm.value)) {
-			error.value = '请完整填写 DNS 记录字段'
+		if (!credentialID.value || !zone.value || !validRecordSet(recordForm.value)) {
+			error.value = '请完整填写 DNS 记录集字段'
 			return
 		}
 		if (!csrfToken.value) await refreshSession()
@@ -154,11 +170,29 @@ export const createDNSController = (gateway: DNSGateway) => {
 		mutationLoading.value = true
 		error.value = ''
 		try {
-			const input = { credentialID: credentialID.value, zone: zone.value, record: recordForm.value, csrfToken: csrfToken.value }
-			snapshot.value = editingRecordID.value ? await gateway.updateRecord({ ...input, recordID: editingRecordID.value }) : await gateway.createRecord(input)
+			let updated = snapshot.value
+			for (const value of recordForm.value.values.filter((item) => item.recordID)) {
+				updated = await gateway.updateRecord({ credentialID: credentialID.value, zone: zone.value, recordID: value.recordID!, record: toRecordInput(recordForm.value, value), csrfToken: csrfToken.value })
+			}
+			for (const value of recordForm.value.values.filter((item) => !item.recordID)) {
+				updated = await gateway.createRecord({ credentialID: credentialID.value, zone: zone.value, record: toRecordInput(recordForm.value, value), csrfToken: csrfToken.value })
+				value.recordID = findCreatedRecordID(updated, recordForm.value, value)
+				if (!value.recordID) throw new Error('新增记录后未能在刷新快照中确认记录 ID')
+				originalStatuses.value[value.recordID] = 'ENABLE'
+			}
+			for (const value of recordForm.value.values) {
+				if (!value.recordID || originalStatuses.value[value.recordID] === value.status) continue
+				updated = await gateway.setRecordStatus({ credentialID: credentialID.value, zone: zone.value, recordID: value.recordID, status: value.status, csrfToken: csrfToken.value })
+			}
+			for (const recordID of removedRecordIDs.value) {
+				updated = await gateway.deleteRecord({ credentialID: credentialID.value, zone: zone.value, recordID, csrfToken: csrfToken.value })
+			}
+			snapshot.value = updated
 			recordModalVisible.value = false
 		} catch (requestError) {
-			error.value = requestError instanceof Error ? requestError.message : 'DNS 记录保存失败，请刷新记录确认实际状态'
+			const message = requestError instanceof Error ? requestError.message : 'DNS 记录集保存失败'
+			await refreshSnapshot()
+			error.value = `${message}，已刷新记录确认实际状态`
 		} finally {
 			mutationLoading.value = false
 		}
@@ -187,11 +221,19 @@ export const createDNSController = (gateway: DNSGateway) => {
 		}
 	}
 
-	return { credentials, zones, snapshot, credentialID, zone, loading, mutationLoading, error, credentialOptions, zoneOptions, recordFilters, visibleRecords, recordModalVisible, editingRecordID, recordForm, setRecordSort, refreshCredentials, refreshZones, refreshSnapshot, refreshSession, setZone, canManageRecord, openCreateRecordForm, openEditRecordForm, setRecordType, saveRecord, deleteRecord, toggleRecordStatus }
+	return { credentials, zones, snapshot, credentialID, zone, loading, mutationLoading, error, credentialOptions, zoneOptions, recordFilters, visibleRecords, recordModalVisible, editingRecordID, recordForm, setRecordSort, refreshCredentials, refreshZones, refreshSnapshot, refreshSession, setZone, canManageRecord, openCreateRecordForm, openEditRecordForm, setRecordType, addRecordValue, removeRecordValue, saveRecord, deleteRecord, toggleRecordStatus }
 }
 
+const recordValue = (record: DNSRecord): DNSRecordSetValue => ({ recordID: record.provider_record_id, name: record.name, type: record.type as DNSRecordInput['type'], ttl: record.ttl, value: record.value, line: record.line, status: record.status as 'ENABLE' | 'DISABLE', priority: record.priority, weight: record.weight, port: record.port, caaFlags: record.caa_flags, caaTag: record.caa_tag, remark: record.remark ?? '', loadBalancingWeight: supportsLoadBalancing(record.type) ? record.load_balancing_weight ?? 1 : undefined })
+
+const toRecordInput = (form: DNSRecordSetInput, value: DNSRecordSetValue): DNSRecordInput => ({ name: form.name, type: form.type, ttl: form.ttl, value: value.value, line: form.line, priority: value.priority, weight: value.weight, port: value.port, caaFlags: value.caaFlags, caaTag: value.caaTag, remark: value.remark, ...(supportsLoadBalancing(form.type) ? { loadBalancingPolicy: form.loadBalancingPolicy, loadBalancingWeight: value.loadBalancingWeight } : {}) })
+
+const findCreatedRecordID = (snapshot: DNSSnapshot, form: DNSRecordSetInput, value: DNSRecordSetValue) => snapshot.records.find((record) => record.name === form.name && record.type === form.type && record.ttl === form.ttl && record.value === value.value && record.line === form.line)?.provider_record_id
+
+const validRecordSet = (form: DNSRecordSetInput) => form.name.trim() !== '' && form.line === 'default' && form.values.length > 0 && form.values.every((value) => validRecordForm(toRecordInput(form, value)))
+
 const validRecordForm = (record: DNSRecordInput) => {
-	if (!record.name.trim() || !record.value.trim() || !record.line.trim() || record.ttl < 600 || record.ttl > 86400) return false
+	if (!record.name.trim() || !record.value.trim() || !record.line.trim() || record.ttl < 600 || record.ttl > 86400 || (record.remark?.length ?? 0) > 50) return false
 	if (record.type === 'MX') return record.priority !== undefined
 	if (record.type === 'SRV') return record.priority !== undefined && record.weight !== undefined && record.port !== undefined
 	if (record.type === 'CAA') return record.caaFlags !== undefined && Boolean(record.caaTag?.trim())

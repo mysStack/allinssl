@@ -25,6 +25,7 @@ type zoneManager interface {
 	DeleteRecord(context.Context, string, string) error
 	SetRecordStatus(context.Context, string, string, string) error
 	SetRecordLoadBalancing(context.Context, string, string, dnsmodel.Record) error
+	SetRecordRemark(context.Context, string, string) error
 }
 
 type readerFactory interface {
@@ -42,6 +43,7 @@ type RecordInput struct {
 	Priority, Weight, Port  *int64
 	CAAFlags                *int64
 	CAATag                  string
+	Remark                  string
 	LoadBalancingPolicy     string
 	LoadBalancingWeight     *int64
 }
@@ -106,6 +108,9 @@ func (s Service) CreateRecord(ctx context.Context, credentialID int64, zone stri
 	}
 	created.LoadBalancingPolicy = record.LoadBalancingPolicy
 	created.LoadBalancingWeight = record.LoadBalancingWeight
+	if err := manager.SetRecordRemark(ctx, created.ProviderRecordID, record.Remark); err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
 	if err := setRecordLoadBalancing(ctx, manager, zone, created.ProviderRecordID, created); err != nil {
 		return dnsmodel.Snapshot{}, err
 	}
@@ -136,6 +141,9 @@ func (s Service) UpdateRecord(ctx context.Context, credentialID int64, zone, rec
 		return dnsmodel.Snapshot{}, err
 	}
 	if err := manager.UpdateRecord(ctx, zone, recordID, record); err != nil {
+		return dnsmodel.Snapshot{}, err
+	}
+	if err := manager.SetRecordRemark(ctx, recordID, record.Remark); err != nil {
 		return dnsmodel.Snapshot{}, err
 	}
 	if err := setRecordLoadBalancing(ctx, manager, zone, recordID, record); err != nil {
@@ -306,6 +314,13 @@ func (c aliDNSClient) UpdateDNSSLBWeight(ctx context.Context, request *alidns.Up
 		return nil, errors.New("nil AliDNS client")
 	}
 	return alidns.UpdateDNSSLBWeightWithContext(ctx, c.client, request, aliDNSRuntimeOptions())
+}
+
+func (c aliDNSClient) UpdateRecordRemark(ctx context.Context, request *alidns.UpdateDomainRecordRemarkRequest) (*alidns.UpdateDomainRecordRemarkResponse, error) {
+	if c.client == nil {
+		return nil, errors.New("nil AliDNS client")
+	}
+	return alidns.UpdateDomainRecordRemarkWithContext(ctx, c.client, request, aliDNSRuntimeOptions())
 }
 
 func aliDNSRuntimeOptions() *dara.RuntimeOptions { return &dara.RuntimeOptions{} }
